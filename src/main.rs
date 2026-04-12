@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use std::process;
 
 mod app;
+mod decode;
 mod enumerator;
 mod folder_view;
 
