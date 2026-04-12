@@ -1,0 +1,41 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Debug iv",
+            "type": "lldb",
+            "request": "launch",
+            "program": "${workspaceFolder}/target/debug/iv",
+            "args": [
+                "${input:imagePath}"
+            ],
+            "cwd": "${workspaceFolder}",
+            "preLaunchTask": "build debug",
+            "env": {
+                "RUST_LOG": "info"
+            }
+        },
+        {
+            "name": "Debug iv (release)",
+            "type": "lldb",
+            "request": "launch",
+            "program": "${workspaceFolder}/target/release/iv",
+            "args": [
+                "${input:imagePath}"
+            ],
+            "cwd": "${workspaceFolder}",
+            "preLaunchTask": "build release",
+            "env": {
+                "RUST_LOG": "info"
+            }
+        }
+    ],
+    "inputs": [
+        {
+            "id": "imagePath",
+            "type": "promptString",
+            "description": "Path to an image file to open",
+            "default": "D:\\Photos\\test.jpg"
+        }
+    ]
+}
