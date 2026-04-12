@@ -1,6 +1,8 @@
 use eframe::egui;
 use std::path::{Path, PathBuf};
 
+use crate::folder_view::FolderView;
+
 // ---------------------------------------------------------------------------
 // Pure (testable) image-loading logic — no GPU context needed
 // ---------------------------------------------------------------------------
@@ -47,7 +49,6 @@ pub fn center_offset(inner: (f32, f32), outer: (f32, f32)) -> (f32, f32) {
 }
 
 /// Recognized image file extensions (lowercase, without dot).
-#[allow(dead_code)] // Used in tests now, used by enumerator in Phase 1
 pub const IMAGE_EXTENSIONS: &[&str] = &[
     // Common raster
     "jpg", "jpeg", "png", "webp", "tiff", "tif", "bmp", "gif",
@@ -56,7 +57,6 @@ pub const IMAGE_EXTENSIONS: &[&str] = &[
 ];
 
 /// Check whether a path has a recognized image extension.
-#[allow(dead_code)] // Used in tests now, used by enumerator in Phase 1
 pub fn is_image_file(path: &Path) -> bool {
     path.extension()
         .and_then(|ext| ext.to_str())
@@ -68,95 +68,120 @@ pub fn is_image_file(path: &Path) -> bool {
 // eframe App — thin wrapper that wires testable logic to the GPU
 // ---------------------------------------------------------------------------
 
+/// What the app is currently showing.
+enum Mode {
+    /// Single image view (Phase 0).
+    Image {
+        path: PathBuf,
+        texture: Option<egui::TextureHandle>,
+        error: Option<String>,
+    },
+    /// Folder grid view (Phase 1).
+    Folder(FolderView),
+}
+
 pub struct App {
-    /// Path to the image file.
-    path: PathBuf,
-    /// Loaded texture handle (None until first frame).
-    texture: Option<egui::TextureHandle>,
-    /// Error message if loading failed.
-    error: Option<String>,
+    mode: Mode,
 }
 
 impl App {
-    pub fn new(_cc: &eframe::CreationContext<'_>, path: PathBuf) -> Self {
+    /// Open the app pointing at a file (single image view).
+    pub fn new_image(_cc: &eframe::CreationContext<'_>, path: PathBuf) -> Self {
         Self {
-            path,
-            texture: None,
-            error: None,
+            mode: Mode::Image {
+                path,
+                texture: None,
+                error: None,
+            },
         }
     }
 
-    fn load_texture(&mut self, ctx: &egui::Context) {
-        if self.texture.is_some() || self.error.is_some() {
-            return; // Already loaded or failed
+    /// Open the app pointing at a folder (grid view).
+    pub fn new_folder(_cc: &eframe::CreationContext<'_>, folder: PathBuf) -> Self {
+        Self {
+            mode: Mode::Folder(FolderView::new(folder)),
+        }
+    }
+
+    fn show_image(
+        ctx: &egui::Context,
+        ui: &mut egui::Ui,
+        path: &Path,
+        texture: &mut Option<egui::TextureHandle>,
+        error: &mut Option<String>,
+    ) {
+        // Load on first frame
+        if texture.is_none() && error.is_none() {
+            log::info!("Loading image: {}", path.display());
+            match load_image(path) {
+                Ok(decoded) => {
+                    let size = [decoded.width as usize, decoded.height as usize];
+                    let color_image =
+                        egui::ColorImage::from_rgba_unmultiplied(size, &decoded.pixels);
+                    *texture = Some(ctx.load_texture(
+                        "image",
+                        color_image,
+                        egui::TextureOptions::LINEAR,
+                    ));
+                    log::info!("Loaded {}x{} image", size[0], size[1]);
+                }
+                Err(msg) => {
+                    log::error!("{msg}");
+                    *error = Some(msg);
+                }
+            }
         }
 
-        log::info!("Loading image: {}", self.path.display());
+        if let Some(err) = error {
+            ui.centered_and_justified(|ui| {
+                ui.colored_label(egui::Color32::from_rgb(255, 80, 80), err.as_str());
+            });
+            return;
+        }
 
-        match load_image(&self.path) {
-            Ok(decoded) => {
-                let size = [decoded.width as usize, decoded.height as usize];
-                let color_image =
-                    egui::ColorImage::from_rgba_unmultiplied(size, &decoded.pixels);
-                self.texture = Some(ctx.load_texture(
-                    "image",
-                    color_image,
-                    egui::TextureOptions::LINEAR,
-                ));
-                log::info!("Loaded {}x{} image", size[0], size[1]);
-            }
-            Err(msg) => {
-                log::error!("{msg}");
-                self.error = Some(msg);
-            }
+        if let Some(tex) = texture {
+            let available = ui.available_size();
+            let tex_size = tex.size_vec2();
+
+            let display_size = fit_size((tex_size.x, tex_size.y), (available.x, available.y));
+            let offset = center_offset(display_size, (available.x, available.y));
+
+            let rect = egui::Rect::from_min_size(
+                ui.min_rect().min + egui::vec2(offset.0, offset.1),
+                egui::vec2(display_size.0, display_size.1),
+            );
+
+            ui.painter().image(
+                tex.id(),
+                rect,
+                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                egui::Color32::WHITE,
+            );
+        } else {
+            ui.centered_and_justified(|ui| {
+                ui.spinner();
+            });
         }
     }
 }
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Load on first frame (keeps startup fast)
-        self.load_texture(ctx);
-
-        // Dark background
         let frame_style = egui::Frame::new().fill(egui::Color32::from_rgb(24, 24, 24));
 
         egui::CentralPanel::default()
             .frame(frame_style)
-            .show(ctx, |ui| {
-                if let Some(ref error) = self.error {
-                    ui.centered_and_justified(|ui| {
-                        ui.colored_label(egui::Color32::from_rgb(255, 80, 80), error);
-                    });
-                    return;
+            .show(ctx, |ui| match &mut self.mode {
+                Mode::Image {
+                    path,
+                    texture,
+                    error,
+                } => {
+                    Self::show_image(ctx, ui, path, texture, error);
                 }
-
-                if let Some(ref texture) = self.texture {
-                    let available = ui.available_size();
-                    let tex_size = texture.size_vec2();
-
-                    let display_size =
-                        fit_size((tex_size.x, tex_size.y), (available.x, available.y));
-                    let offset = center_offset(display_size, (available.x, available.y));
-
-                    let rect = egui::Rect::from_min_size(
-                        ui.min_rect().min + egui::vec2(offset.0, offset.1),
-                        egui::vec2(display_size.0, display_size.1),
-                    );
-
-                    ui.painter().image(
-                        texture.id(),
-                        rect,
-                        egui::Rect::from_min_max(
-                            egui::pos2(0.0, 0.0),
-                            egui::pos2(1.0, 1.0),
-                        ),
-                        egui::Color32::WHITE,
-                    );
-                } else {
-                    ui.centered_and_justified(|ui| {
-                        ui.spinner();
-                    });
+                Mode::Folder(folder_view) => {
+                    let _clicked = folder_view.show(ctx, ui);
+                    // Phase 5 will handle click → image view transition
                 }
             });
     }

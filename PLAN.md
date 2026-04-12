@@ -83,7 +83,7 @@
 - **Exit criterion:** `iv.exe D:\Photos` shows a scrolling grid of gray boxes with filenames that populates progressively.
 
 ### Phase 2 — EXIF Thumbnail Extraction (First Pixels on Screen)
-**Goal:** Extract embedded JPEG thumbnails for near-instant previews.
+**Goal:** Extract embedded JPEG thumbnails for near-instant preview\s.
 
 - For each discovered image, read just the EXIF/TIFF header (first ~64KB of file)
 - Extract the embedded thumbnail JPEG (typically 160×120 or 320×240)
