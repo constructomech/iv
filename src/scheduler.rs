@@ -10,12 +10,25 @@ const BUFFER_ROWS: usize = 3;
 pub enum ThumbState {
     /// Not yet queued for loading.
     Pending,
-    /// Queued or in-progress on a worker thread.
-    Loading,
+    /// EXIF-only check in progress.
+    ExifLoading,
+    /// EXIF check done, no thumbnail found — needs full decode.
+    ExifFailed,
+    /// Full decode in progress.
+    FullLoading,
     /// Successfully decoded and uploaded (or ready to upload).
     Loaded,
     /// Failed to decode.
     Failed,
+}
+
+/// What kind of work a work item represents.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkTier {
+    /// Try EXIF thumbnail extraction only (reads ~256KB).
+    ExifOnly,
+    /// Full image decode + downscale (reads entire file).
+    FullDecode,
 }
 
 /// Per-image scheduling state. No GPU types — purely logical.
@@ -35,6 +48,7 @@ pub struct WorkItem {
     pub idx: usize,
     pub path: PathBuf,
     pub generation: u64,
+    pub tier: WorkTier,
 }
 
 /// Pure scheduling logic for thumbnail loading, separated from GPU/UI concerns.
@@ -128,8 +142,10 @@ impl Scheduler {
 
             // Reset in-flight tiles to Pending so they can be re-scheduled
             for entry in &mut self.entries {
-                if entry.state == ThumbState::Loading {
-                    entry.state = ThumbState::Pending;
+                match entry.state {
+                    ThumbState::ExifLoading => entry.state = ThumbState::Pending,
+                    ThumbState::FullLoading => entry.state = ThumbState::ExifFailed,
+                    _ => {}
                 }
             }
             bumped = true;
@@ -139,9 +155,15 @@ impl Scheduler {
     }
 
     /// Get the next batch of work items to send to decode workers.
-    /// Returns Pending tiles in the visible + buffer range, sorted by
-    /// distance from viewport center (closest first).
-    /// Transitions returned tiles from Pending → Loading.
+    ///
+    /// Two-tier priority:
+    /// 1. **EXIF pass first**: All visible+buffer Pending tiles get EXIF-only work items.
+    ///    These read only ~256KB and are very fast (~1-3ms each).
+    /// 2. **Full decode second**: Only after NO Pending tiles remain in the visible range,
+    ///    ExifFailed tiles get full-decode work items.
+    ///
+    /// This ensures every visible tile gets a fast EXIF check before any slow
+    /// full decodes start, giving the best perceived performance.
     pub fn get_work_batch(&mut self) -> Vec<WorkItem> {
         let (vis_start, vis_end) = self.visible_range;
         if vis_end == 0 && self.entries.is_empty() {
@@ -160,45 +182,85 @@ impl Scheduler {
             0
         };
 
-        // Collect pending tiles with their priority (distance from center)
-        let mut pending: Vec<(usize, usize)> = Vec::new();
+        // Tier 0: Collect Pending tiles for EXIF-only pass
+        let mut exif_pending: Vec<(usize, usize)> = Vec::new();
+        let mut full_pending: Vec<(usize, usize)> = Vec::new();
+
         for idx in load_start..load_end {
-            if self.entries[idx].state == ThumbState::Pending {
-                let distance = if idx > center {
-                    idx - center
-                } else {
-                    center - idx
-                };
-                pending.push((idx, distance));
+            let distance = if idx > center {
+                idx - center
+            } else {
+                center - idx
+            };
+            match self.entries[idx].state {
+                ThumbState::Pending => exif_pending.push((idx, distance)),
+                ThumbState::ExifFailed => full_pending.push((idx, distance)),
+                _ => {}
             }
         }
 
-        // Sort by distance from center (closest first)
-        pending.sort_by_key(|&(_, distance)| distance);
+        // If there are Pending tiles, return EXIF-only work (fast pass first)
+        if !exif_pending.is_empty() {
+            exif_pending.sort_by_key(|&(_, distance)| distance);
+            let current_gen = self.generation;
+            return exif_pending
+                .into_iter()
+                .map(|(idx, _)| {
+                    self.entries[idx].state = ThumbState::ExifLoading;
+                    WorkItem {
+                        idx,
+                        path: self.entries[idx].path.clone(),
+                        generation: current_gen,
+                        tier: WorkTier::ExifOnly,
+                    }
+                })
+                .collect();
+        }
 
-        // Build work items and transition to Loading
-        let current_gen = self.generation;
-        pending
-            .into_iter()
-            .map(|(idx, _)| {
-                self.entries[idx].state = ThumbState::Loading;
-                WorkItem {
-                    idx,
-                    path: self.entries[idx].path.clone(),
-                    generation: current_gen,
-                }
-            })
-            .collect()
+        // No more EXIF work — return full-decode work for ExifFailed tiles
+        if !full_pending.is_empty() {
+            full_pending.sort_by_key(|&(_, distance)| distance);
+            let current_gen = self.generation;
+            return full_pending
+                .into_iter()
+                .map(|(idx, _)| {
+                    self.entries[idx].state = ThumbState::FullLoading;
+                    WorkItem {
+                        idx,
+                        path: self.entries[idx].path.clone(),
+                        generation: current_gen,
+                        tier: WorkTier::FullDecode,
+                    }
+                })
+                .collect();
+        }
+
+        Vec::new()
+    }
+
+    /// Mark a tile's EXIF attempt as failed — it needs full decode.
+    pub fn exif_failed(&mut self, idx: usize, timings: DecodeTimings) {
+        if idx < self.entries.len() {
+            self.entries[idx].state = ThumbState::ExifFailed;
+            self.entries[idx].timings = Some(timings);
+        }
     }
 
     /// Mark a tile as successfully loaded.
-    /// Always accepts results — even from an older generation,
-    /// because the decoded pixels are valid regardless.
+    /// Always accepts results — even from an older generation.
+    /// Merges timings with any existing EXIF timing from the first pass.
     pub fn complete(&mut self, idx: usize, is_exif: bool, timings: DecodeTimings) {
         if idx < self.entries.len() {
             self.entries[idx].state = ThumbState::Loaded;
             self.entries[idx].is_exif_quality = is_exif;
-            self.entries[idx].timings = Some(timings);
+            // Merge: keep EXIF timing from first pass, add full timing from second
+            if let Some(existing) = &self.entries[idx].timings {
+                let mut merged = existing.clone();
+                merged.full_ms = timings.full_ms;
+                self.entries[idx].timings = Some(merged);
+            } else {
+                self.entries[idx].timings = Some(timings);
+            }
         }
     }
 
@@ -220,11 +282,17 @@ impl Scheduler {
         self.entries.iter().filter(|e| e.state == state).count()
     }
 
-    /// Returns true if any tiles are still Pending or Loading.
+    /// Returns true if any tiles are still pending work.
     pub fn has_pending_work(&self) -> bool {
-        self.entries
-            .iter()
-            .any(|e| matches!(e.state, ThumbState::Pending | ThumbState::Loading))
+        self.entries.iter().any(|e| {
+            matches!(
+                e.state,
+                ThumbState::Pending
+                    | ThumbState::ExifLoading
+                    | ThumbState::ExifFailed
+                    | ThumbState::FullLoading
+            )
+        })
     }
 }
 
@@ -331,9 +399,9 @@ mod tests {
         let batch1 = s.get_work_batch();
         assert!(!batch1.is_empty());
 
-        // All returned tiles should now be Loading
+        // All returned tiles should now be ExifLoading
         for item in &batch1 {
-            assert_eq!(s.entry(item.idx).state, ThumbState::Loading);
+            assert_eq!(s.entry(item.idx).state, ThumbState::ExifLoading);
         }
 
         // Second batch should return nothing (no more Pending in range)
@@ -375,8 +443,8 @@ mod tests {
         assert!(bumped, "big scroll should bump generation");
         assert_eq!(s.generation(), 1);
 
-        // Previously Loading tiles should be back to Pending
-        assert_eq!(s.count_in_state(ThumbState::Loading), 0);
+        // Previously ExifLoading tiles should be back to Pending
+        assert_eq!(s.count_in_state(ThumbState::ExifLoading), 0);
         assert!(s.count_in_state(ThumbState::Pending) >= loading_count);
     }
 

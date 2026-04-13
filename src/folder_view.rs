@@ -9,7 +9,7 @@ use crate::app::DecodedImage;
 use crate::decode;
 use crate::decode::DecodeTimings;
 use crate::enumerator::{self, EnumHandle, EnumMessage};
-use crate::scheduler::{Scheduler, ThumbState, WorkItem};
+use crate::scheduler::{Scheduler, ThumbState, WorkItem, WorkTier};
 
 /// Returns true if IV_DEBUG env var is set to a truthy value.
 fn debug_mode() -> bool {
@@ -35,9 +35,26 @@ fn num_thumb_workers() -> usize {
 }
 
 /// Result sent back from a thumbnail worker.
-struct ThumbResult {
-    idx: usize,
-    result: Result<(DecodedImage, bool, DecodeTimings), String>,
+enum ThumbResult {
+    /// EXIF extraction succeeded — here's the thumbnail.
+    ExifOk {
+        idx: usize,
+        image: DecodedImage,
+        timings: decode::DecodeTimings,
+    },
+    /// EXIF extraction failed — tile needs full decode.
+    ExifMiss {
+        idx: usize,
+        timings: decode::DecodeTimings,
+    },
+    /// Full decode succeeded.
+    FullOk {
+        idx: usize,
+        image: DecodedImage,
+        timings: decode::DecodeTimings,
+    },
+    /// Full decode failed.
+    FullErr { idx: usize, error: String },
 }
 
 /// Manages a pool of worker threads that decode thumbnails.
@@ -69,15 +86,37 @@ impl ThumbLoader {
                         continue;
                     }
 
-                    let result =
-                        decode::decode_thumbnail_progressive(&work.path, THUMB_DECODE_SIZE);
-                    if result_tx
-                        .send(ThumbResult {
-                            idx: work.idx,
-                            result,
-                        })
-                        .is_err()
-                    {
+                    let result = match work.tier {
+                        WorkTier::ExifOnly => {
+                            let (exif_result, timings) = decode::try_exif_only(&work.path);
+                            match exif_result {
+                                Some(image) => ThumbResult::ExifOk {
+                                    idx: work.idx,
+                                    image,
+                                    timings,
+                                },
+                                None => ThumbResult::ExifMiss {
+                                    idx: work.idx,
+                                    timings,
+                                },
+                            }
+                        }
+                        WorkTier::FullDecode => {
+                            match decode::decode_full_thumbnail(&work.path, THUMB_DECODE_SIZE) {
+                                Ok((image, timings)) => ThumbResult::FullOk {
+                                    idx: work.idx,
+                                    image,
+                                    timings,
+                                },
+                                Err(e) => ThumbResult::FullErr {
+                                    idx: work.idx,
+                                    error: e,
+                                },
+                            }
+                        }
+                    };
+
+                    if result_tx.send(result).is_err() {
                         break;
                     }
                 }
@@ -177,30 +216,58 @@ impl FolderView {
         }
     }
 
-    /// Drain completed thumbnails from the loader and upload to GPU.
-    /// Always accepts results — decoded pixels are valid regardless of generation.
+    /// Drain completed results from the loader and update scheduler/textures.
     fn poll_thumbnails(&mut self, ctx: &egui::Context) {
         while let Ok(result) = self.thumb_loader.result_rx.try_recv() {
-            if result.idx < self.scheduler.len() {
-                match result.result {
-                    Ok((decoded, is_exif, timings)) => {
-                        let size = [decoded.width as usize, decoded.height as usize];
+            match result {
+                ThumbResult::ExifOk {
+                    idx,
+                    image,
+                    timings,
+                } => {
+                    if idx < self.scheduler.len() {
+                        let size = [image.width as usize, image.height as usize];
                         let color_image =
-                            egui::ColorImage::from_rgba_unmultiplied(size, &decoded.pixels);
+                            egui::ColorImage::from_rgba_unmultiplied(size, &image.pixels);
                         let texture = ctx.load_texture(
-                            format!("thumb_{}", result.idx),
+                            format!("thumb_{idx}"),
                             color_image,
                             egui::TextureOptions::LINEAR,
                         );
-                        self.textures[result.idx] = Some(texture);
-                        self.scheduler.complete(result.idx, is_exif, timings);
+                        self.textures[idx] = Some(texture);
+                        self.scheduler.complete(idx, true, timings);
                     }
-                    Err(e) => {
-                        log::warn!(
-                            "Thumbnail failed for {}: {e}",
-                            self.scheduler.entry(result.idx).path.display()
+                }
+                ThumbResult::ExifMiss { idx, timings } => {
+                    if idx < self.scheduler.len() {
+                        self.scheduler.exif_failed(idx, timings);
+                    }
+                }
+                ThumbResult::FullOk {
+                    idx,
+                    image,
+                    timings,
+                } => {
+                    if idx < self.scheduler.len() {
+                        let size = [image.width as usize, image.height as usize];
+                        let color_image =
+                            egui::ColorImage::from_rgba_unmultiplied(size, &image.pixels);
+                        let texture = ctx.load_texture(
+                            format!("thumb_{idx}"),
+                            color_image,
+                            egui::TextureOptions::LINEAR,
                         );
-                        self.scheduler.fail(result.idx);
+                        self.textures[idx] = Some(texture);
+                        self.scheduler.complete(idx, false, timings);
+                    }
+                }
+                ThumbResult::FullErr { idx, error } => {
+                    if idx < self.scheduler.len() {
+                        log::warn!(
+                            "Thumbnail failed for {}: {error}",
+                            self.scheduler.entry(idx).path.display()
+                        );
+                        self.scheduler.fail(idx);
                     }
                 }
             }

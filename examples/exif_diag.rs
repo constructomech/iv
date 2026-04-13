@@ -42,8 +42,9 @@ fn main() {
         }
 
         // Step 2: Try our extraction
+        let file_data = std::fs::read(path).expect("failed to read file");
         let start = std::time::Instant::now();
-        match iv::extract_exif_thumbnail(path) {
+        match iv::extract_exif_thumbnail(&file_data) {
             Some(img) => println!(
                 "  EXIF thumb: {}x{} ({:.1}ms)",
                 img.width,

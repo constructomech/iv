@@ -1,4 +1,4 @@
-use std::io::{BufReader, Read, Seek};
+use std::io::Cursor;
 use std::path::Path;
 
 use crate::app::DecodedImage;
@@ -6,26 +6,74 @@ use crate::app::DecodedImage;
 /// Timing data from the decode pipeline.
 #[derive(Debug, Clone, Default)]
 pub struct DecodeTimings {
-    /// Time spent attempting EXIF thumbnail extraction (always measured).
+    /// Time spent attempting EXIF thumbnail extraction.
     pub exif_ms: f64,
     /// Time spent on full decode + downscale (0 if EXIF succeeded).
     pub full_ms: f64,
 }
 
-/// Try to extract the EXIF embedded thumbnail from an image file.
-/// This reads only the header (~64KB) and is very fast.
-/// Returns None if no embedded thumbnail is found.
-pub fn extract_exif_thumbnail(path: &Path) -> Option<DecodedImage> {
-    let file = std::fs::File::open(path).ok()?;
-    let mut reader = BufReader::new(file);
+/// Maximum bytes to read for an EXIF-only check (256KB covers all EXIF headers).
+const EXIF_READ_SIZE: usize = 256 * 1024;
 
+/// Tier 0: Try EXIF thumbnail extraction only.
+/// Reads at most 256KB from disk — very fast, especially on network shares.
+/// Returns Some(image) if an embedded JPEG thumbnail was found.
+pub fn try_exif_only(path: &Path) -> (Option<DecodedImage>, DecodeTimings) {
+    let mut timings = DecodeTimings::default();
+    let start = std::time::Instant::now();
+
+    let result = (|| -> Option<DecodedImage> {
+        let mut file = std::fs::File::open(path).ok()?;
+        let file_len = file.metadata().ok()?.len() as usize;
+        let read_len = file_len.min(EXIF_READ_SIZE);
+
+        let mut buf = vec![0u8; read_len];
+        std::io::Read::read_exact(&mut file, &mut buf).ok()?;
+
+        extract_exif_thumbnail(&buf)
+    })();
+
+    timings.exif_ms = start.elapsed().as_secs_f64() * 1000.0;
+    (result, timings)
+}
+
+/// Tier 1: Full image decode + downscale to thumbnail.
+/// Reads the entire file. Only call after EXIF has been tried and failed.
+pub fn decode_full_thumbnail(
+    path: &Path,
+    max_size: u32,
+) -> Result<(DecodedImage, DecodeTimings), String> {
+    let mut timings = DecodeTimings::default();
+    let start = std::time::Instant::now();
+
+    let data =
+        std::fs::read(path).map_err(|e| format!("Failed to read {}: {e}", path.display()))?;
+    let img = image::load_from_memory(&data).map_err(|e| format!("Failed to decode: {e}"))?;
+    let thumb = img.thumbnail(max_size, max_size);
+    let rgba = thumb.to_rgba8();
+
+    timings.full_ms = start.elapsed().as_secs_f64() * 1000.0;
+
+    Ok((
+        DecodedImage {
+            width: rgba.width(),
+            height: rgba.height(),
+            pixels: rgba.into_raw(),
+        },
+        timings,
+    ))
+}
+
+/// Try to extract the EXIF embedded thumbnail from file bytes.
+pub fn extract_exif_thumbnail(data: &[u8]) -> Option<DecodedImage> {
+    let cursor = Cursor::new(data);
     let exif_reader = exif::Reader::new();
-    let exif = exif_reader.read_from_container(&mut reader).ok()?;
+    let exif = exif_reader
+        .read_from_container(&mut std::io::BufReader::new(cursor))
+        .ok()?;
 
-    // Look for JPEG thumbnail data in the EXIF
     for field in exif.fields() {
         if field.tag == exif::Tag::JPEGInterchangeFormat {
-            // There's a thumbnail — re-read the file to get the raw bytes
             if let (Some(offset_field), Some(length_field)) = (
                 exif.get_field(exif::Tag::JPEGInterchangeFormat, field.ifd_num),
                 exif.get_field(exif::Tag::JPEGInterchangeFormatLength, field.ifd_num),
@@ -34,7 +82,7 @@ pub fn extract_exif_thumbnail(path: &Path) -> Option<DecodedImage> {
                     offset_field.value.get_uint(0),
                     length_field.value.get_uint(0),
                 ) {
-                    return decode_exif_jpeg_thumbnail(path, offset, length);
+                    return find_and_decode_exif_jpeg(data, offset, length);
                 }
             }
         }
@@ -43,53 +91,24 @@ pub fn extract_exif_thumbnail(path: &Path) -> Option<DecodedImage> {
     None
 }
 
-/// Read and decode the JPEG thumbnail embedded at the given offset in the file.
-fn decode_exif_jpeg_thumbnail(path: &Path, offset: u32, length: u32) -> Option<DecodedImage> {
-    let mut file = std::fs::File::open(path).ok()?;
-
-    // The offset is relative to the TIFF header, which starts after the EXIF marker.
-    // For JPEG files, we need to find where the EXIF APP1 data starts.
-    // The kamadak-exif library handles this internally, but for raw access we need
-    // to scan for the EXIF data ourselves.
-    //
-    // Simpler approach: just try decoding the thumbnail data from the field values
-    // that the exif reader already parsed. Let's re-read via the exif crate.
-
-    // Actually, the simplest reliable approach: re-read the EXIF and get thumbnail
-    // bytes directly if the reader supports it. kamadak-exif doesn't expose raw
-    // thumbnail bytes easily, so let's use a different strategy:
-    // Read the first 256KB of the file and look for the embedded JPEG.
-
-    let mut buf = Vec::new();
-    let file_len = file.metadata().ok()?.len();
-    let read_len = file_len.min(256 * 1024) as usize;
-    buf.resize(read_len, 0);
-    file.seek(std::io::SeekFrom::Start(0)).ok()?;
-    file.read_exact(&mut buf).ok()?;
-
-    // Search for JPEG SOI marker (0xFF 0xD8) starting from the offset hint.
-    // The offset from EXIF is relative to the TIFF header start, which we
-    // approximate by searching near it.
+/// Search for and decode the embedded JPEG thumbnail in the file data.
+fn find_and_decode_exif_jpeg(data: &[u8], offset: u32, length: u32) -> Option<DecodedImage> {
     let search_start = (offset as usize).saturating_sub(20);
-    let search_end = ((offset + length) as usize + 100).min(buf.len());
+    let search_end = ((offset + length) as usize + 100).min(data.len());
 
-    // Find the embedded JPEG by looking for SOI marker
     for i in search_start..search_end.saturating_sub(1) {
-        if buf[i] == 0xFF && buf[i + 1] == 0xD8 {
-            // Found JPEG start, now find the end (EOI: 0xFF 0xD9)
+        if data[i] == 0xFF && data[i + 1] == 0xD8 {
             let jpeg_start = i;
-            let max_end = (jpeg_start + length as usize + 1000).min(buf.len());
+            let max_end = (jpeg_start + length as usize + 1000).min(data.len());
+            // Look for EOI marker
             for j in (jpeg_start + 2)..max_end.saturating_sub(1) {
-                if buf[j] == 0xFF && buf[j + 1] == 0xD9 {
-                    let jpeg_end = j + 2;
-                    let jpeg_data = &buf[jpeg_start..jpeg_end];
-                    return decode_jpeg_bytes(jpeg_data);
+                if data[j] == 0xFF && data[j + 1] == 0xD9 {
+                    return decode_jpeg_bytes(&data[jpeg_start..j + 2]);
                 }
             }
-            // If we found SOI but no EOI, try using length hint
-            let jpeg_end = (jpeg_start + length as usize).min(buf.len());
-            let jpeg_data = &buf[jpeg_start..jpeg_end];
-            return decode_jpeg_bytes(jpeg_data);
+            // No EOI found, use length hint
+            let jpeg_end = (jpeg_start + length as usize).min(data.len());
+            return decode_jpeg_bytes(&data[jpeg_start..jpeg_end]);
         }
     }
 
@@ -101,7 +120,7 @@ fn decode_jpeg_bytes(data: &[u8]) -> Option<DecodedImage> {
     use zune_core::options::DecoderOptions;
     use zune_jpeg::JpegDecoder;
 
-    let cursor = std::io::Cursor::new(data);
+    let cursor = Cursor::new(data);
     let opts =
         DecoderOptions::default().jpeg_set_out_colorspace(zune_core::colorspace::ColorSpace::RGBA);
     let mut decoder = JpegDecoder::new_with_options(cursor, opts);
@@ -115,43 +134,25 @@ fn decode_jpeg_bytes(data: &[u8]) -> Option<DecodedImage> {
     })
 }
 
-/// Decode an image file to a thumbnail of at most `max_size` x `max_size` pixels.
-/// Uses image crate's integrated scale-on-decode for best performance.
+/// Convenience for tests: decode a thumbnail from a path.
 pub fn decode_thumbnail(path: &Path, max_size: u32) -> Result<DecodedImage, String> {
-    let img = image::open(path).map_err(|e| format!("Failed to load {}: {e}", path.display()))?;
-
-    let thumb = img.thumbnail(max_size, max_size);
-    let rgba = thumb.to_rgba8();
-
-    Ok(DecodedImage {
-        width: rgba.width(),
-        height: rgba.height(),
-        pixels: rgba.into_raw(),
-    })
+    let (img, _timings) = decode_full_thumbnail(path, max_size)?;
+    Ok(img)
 }
 
-/// Try EXIF thumbnail first (fast), then fall back to full decode (quality).
-/// Returns the decoded thumbnail, whether it came from EXIF, and timing data.
+/// Convenience: progressive decode matching old API for tests/examples.
 pub fn decode_thumbnail_progressive(
     path: &Path,
     max_size: u32,
 ) -> Result<(DecodedImage, bool, DecodeTimings), String> {
-    let mut timings = DecodeTimings::default();
-
-    // Tier 0: Try EXIF embedded thumbnail (~1ms)
-    let exif_start = std::time::Instant::now();
-    let exif_result = extract_exif_thumbnail(path);
-    timings.exif_ms = exif_start.elapsed().as_secs_f64() * 1000.0;
+    let (exif_result, mut timings) = try_exif_only(path);
 
     if let Some(thumb) = exif_result {
         return Ok((thumb, true, timings));
     }
 
-    // Tier 1: Full decode + downscale
-    let full_start = std::time::Instant::now();
-    let decoded = decode_thumbnail(path, max_size)?;
-    timings.full_ms = full_start.elapsed().as_secs_f64() * 1000.0;
-
+    let (decoded, full_timings) = decode_full_thumbnail(path, max_size)?;
+    timings.full_ms = full_timings.full_ms;
     Ok((decoded, false, timings))
 }
 
@@ -271,10 +272,10 @@ mod tests {
     #[test]
     fn exif_extract_from_jpeg_without_exif() {
         let dir = make_test_dir("no_exif");
-        // Our test JPEG helper creates images without EXIF data
         let path = create_test_jpeg(&dir, "no_exif.jpg", 200, 150);
 
-        let result = extract_exif_thumbnail(&path);
+        let data = fs::read(&path).unwrap();
+        let result = extract_exif_thumbnail(&data);
         // Should return None — no EXIF data in our synthetic images
         assert!(result.is_none());
 
@@ -283,7 +284,7 @@ mod tests {
 
     #[test]
     fn exif_extract_nonexistent_returns_none() {
-        let result = extract_exif_thumbnail(Path::new("/no/such/file.jpg"));
+        let result = extract_exif_thumbnail(&[]);
         assert!(result.is_none());
     }
 }
