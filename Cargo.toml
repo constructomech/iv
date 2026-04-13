@@ -6,11 +6,17 @@ edition = "2024"
 [dependencies]
 eframe = "0.31"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp", "tiff", "bmp"] }
+kamadak-exif = "0.6"
 log = "0.4"
 env_logger = "0.11"
 
 [dev-dependencies]
 tempfile = "3"
+
+# Optimize dependencies even in debug builds — image decoding is 20-50x
+# slower without this. Our own code stays unoptimized for debugging.
+[profile.dev.package."*"]
+opt-level = 2
 
 [profile.release]
 opt-level = 3

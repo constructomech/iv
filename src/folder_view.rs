@@ -1,5 +1,6 @@
 use eframe::egui;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -7,6 +8,12 @@ use std::thread;
 use crate::app::DecodedImage;
 use crate::decode;
 use crate::enumerator::{self, EnumHandle, EnumMessage};
+use crate::scheduler::{Scheduler, ThumbState, WorkItem};
+
+/// Returns true if IV_DEBUG env var is set to a truthy value.
+fn debug_mode() -> bool {
+    std::env::var("IV_DEBUG").map_or(false, |v| v == "1" || v.eq_ignore_ascii_case("true"))
+}
 
 /// Thumbnail tile size in the grid.
 const TILE_SIZE: f32 = 160.0;
@@ -21,58 +28,71 @@ const THUMB_DECODE_SIZE: u32 = 160;
 /// Number of thumbnail worker threads.
 const NUM_THUMB_WORKERS: usize = 4;
 
-/// Per-image state in the grid.
-struct ImageEntry {
-    path: PathBuf,
-    texture: Option<egui::TextureHandle>,
-    state: ThumbState,
-}
-
-/// Thumbnail loading state.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)] // Pending used when we add visibility-based loading in Phase 3
-enum ThumbState {
-    /// Waiting to be queued for loading.
-    Pending,
-    /// Queued or in-progress on a worker thread.
-    Loading,
-    /// Successfully decoded and uploaded to GPU.
-    Loaded,
-    /// Failed to decode.
-    Failed,
+/// Result sent back from a thumbnail worker.
+struct ThumbResult {
+    idx: usize,
+    result: Result<(DecodedImage, bool), String>,
 }
 
 /// Manages a pool of worker threads that decode thumbnails.
 struct ThumbLoader {
-    work_tx: mpsc::Sender<(usize, PathBuf)>,
-    result_rx: mpsc::Receiver<(usize, Result<DecodedImage, String>)>,
+    work_tx: mpsc::Sender<WorkItem>,
+    result_rx: mpsc::Receiver<ThumbResult>,
+    /// Shared generation counter — workers check this to skip stale items.
+    generation: Arc<AtomicU64>,
 }
 
 impl ThumbLoader {
     fn new() -> Self {
-        let (work_tx, work_rx) = mpsc::channel::<(usize, PathBuf)>();
+        let (work_tx, work_rx) = mpsc::channel::<WorkItem>();
         let (result_tx, result_rx) = mpsc::channel();
+        let generation = Arc::new(AtomicU64::new(0));
 
         let work_rx = Arc::new(Mutex::new(work_rx));
 
         for _ in 0..NUM_THUMB_WORKERS {
             let work_rx = work_rx.clone();
             let result_tx = result_tx.clone();
+            let generation = generation.clone();
             thread::spawn(move || {
-                while let Ok((idx, path)) = work_rx.lock().unwrap().recv() {
-                    let result = decode::decode_thumbnail(&path, THUMB_DECODE_SIZE);
-                    if result_tx.send((idx, result)).is_err() {
-                        break; // Receiver dropped, shutting down
+                while let Ok(work) = work_rx.lock().unwrap().recv() {
+                    // Skip stale work
+                    if work.generation < generation.load(Ordering::Relaxed) {
+                        continue;
+                    }
+
+                    let result =
+                        decode::decode_thumbnail_progressive(&work.path, THUMB_DECODE_SIZE);
+                    if result_tx
+                        .send(ThumbResult {
+                            idx: work.idx,
+                            result,
+                        })
+                        .is_err()
+                    {
+                        break;
                     }
                 }
             });
         }
 
-        Self { work_tx, result_rx }
+        Self {
+            work_tx,
+            result_rx,
+            generation,
+        }
     }
 
-    fn queue(&self, idx: usize, path: &PathBuf) {
-        let _ = self.work_tx.send((idx, path.clone()));
+    /// Send work items to the thread pool.
+    fn send_batch(&self, batch: Vec<WorkItem>) {
+        for item in batch {
+            let _ = self.work_tx.send(item);
+        }
+    }
+
+    /// Sync the shared generation counter with the scheduler's.
+    fn sync_generation(&self, generation: u64) {
+        self.generation.store(generation, Ordering::Relaxed);
     }
 }
 
@@ -80,18 +100,16 @@ impl ThumbLoader {
 pub struct FolderView {
     /// Directory being viewed.
     folder: PathBuf,
-    /// Discovered image entries with thumbnail state.
-    entries: Vec<ImageEntry>,
+    /// Scheduling logic (no GPU dependency).
+    scheduler: Scheduler,
+    /// GPU textures, indexed same as scheduler entries.
+    textures: Vec<Option<egui::TextureHandle>>,
     /// Whether enumeration has completed.
     enum_done: bool,
-    /// Total count reported by enumerator (set when done).
-    enum_total: Option<usize>,
     /// Handle to the background enumerator.
     enum_handle: Option<EnumHandle>,
     /// Thumbnail loader thread pool.
     thumb_loader: ThumbLoader,
-    /// Whether all thumbnails have been loaded.
-    thumbs_done: bool,
     /// Error from enumeration, if any.
     error: Option<String>,
 }
@@ -101,12 +119,11 @@ impl FolderView {
         let enum_handle = Some(enumerator::enumerate_folder(folder.clone()));
         Self {
             folder,
-            entries: Vec::new(),
+            scheduler: Scheduler::new(),
+            textures: Vec::new(),
             enum_done: false,
-            enum_total: None,
             enum_handle,
             thumb_loader: ThumbLoader::new(),
-            thumbs_done: false,
             error: None,
         }
     }
@@ -114,21 +131,14 @@ impl FolderView {
     /// Drain pending messages from the enumerator (non-blocking).
     fn poll_enumerator(&mut self) {
         if let Some(ref handle) = self.enum_handle {
-            // Drain all available messages without blocking
             loop {
                 match handle.receiver.try_recv() {
                     Ok(EnumMessage::Found(path)) => {
-                        let idx = self.entries.len();
-                        self.thumb_loader.queue(idx, &path);
-                        self.entries.push(ImageEntry {
-                            path,
-                            texture: None,
-                            state: ThumbState::Loading,
-                        });
+                        self.scheduler.add_entry(path);
+                        self.textures.push(None);
                     }
                     Ok(EnumMessage::Done(count)) => {
                         self.enum_done = true;
-                        self.enum_total = Some(count);
                         log::info!(
                             "Enumeration complete: {} images in {}",
                             count,
@@ -154,45 +164,38 @@ impl FolderView {
             }
         }
 
-        // Drop the handle once done to free the thread resources
         if self.enum_done {
             self.enum_handle = None;
         }
     }
 
     /// Drain completed thumbnails from the loader and upload to GPU.
+    /// Always accepts results — decoded pixels are valid regardless of generation.
     fn poll_thumbnails(&mut self, ctx: &egui::Context) {
-        let mut got_any = false;
-
-        while let Ok((idx, result)) = self.thumb_loader.result_rx.try_recv() {
-            got_any = true;
-            if idx < self.entries.len() {
-                match result {
-                    Ok(decoded) => {
+        while let Ok(result) = self.thumb_loader.result_rx.try_recv() {
+            if result.idx < self.scheduler.len() {
+                match result.result {
+                    Ok((decoded, is_exif)) => {
                         let size = [decoded.width as usize, decoded.height as usize];
                         let color_image =
                             egui::ColorImage::from_rgba_unmultiplied(size, &decoded.pixels);
                         let texture = ctx.load_texture(
-                            format!("thumb_{idx}"),
+                            format!("thumb_{}", result.idx),
                             color_image,
                             egui::TextureOptions::LINEAR,
                         );
-                        self.entries[idx].texture = Some(texture);
-                        self.entries[idx].state = ThumbState::Loaded;
+                        self.textures[result.idx] = Some(texture);
+                        self.scheduler.complete(result.idx, is_exif);
                     }
                     Err(e) => {
-                        log::warn!("Thumbnail failed for {}: {e}", self.entries[idx].path.display());
-                        self.entries[idx].state = ThumbState::Failed;
+                        log::warn!(
+                            "Thumbnail failed for {}: {e}",
+                            self.scheduler.entry(result.idx).path.display()
+                        );
+                        self.scheduler.fail(result.idx);
                     }
                 }
             }
-        }
-
-        // Check if all thumbnails are done
-        if !got_any && self.enum_done {
-            self.thumbs_done = self.entries.iter().all(|e| {
-                matches!(e.state, ThumbState::Loaded | ThumbState::Failed)
-            });
         }
     }
 
@@ -201,8 +204,8 @@ impl FolderView {
         self.poll_enumerator();
         self.poll_thumbnails(ctx);
 
-        // Request repaint while work is in progress
-        if !self.enum_done || !self.thumbs_done {
+        // Request repaint while work is pending
+        if !self.enum_done || self.scheduler.has_pending_work() {
             ctx.request_repaint();
         }
 
@@ -215,25 +218,22 @@ impl FolderView {
         }
 
         // Status bar at top
-        let loaded_count = self.entries.iter().filter(|e| e.state == ThumbState::Loaded).count();
-        let status = if self.enum_done && self.thumbs_done {
-            format!(
-                "{} — {} images",
-                self.folder.display(),
-                self.entries.len()
-            )
+        let total = self.scheduler.len();
+        let loaded = self.scheduler.count_in_state(ThumbState::Loaded);
+        let status = if self.enum_done && loaded == total {
+            format!("{} — {} images", self.folder.display(), total)
         } else if self.enum_done {
             format!(
                 "{} — loading thumbnails ({}/{})…",
                 self.folder.display(),
-                loaded_count,
-                self.entries.len()
+                loaded,
+                total
             )
         } else {
             format!(
                 "{} — scanning… ({} found)",
                 self.folder.display(),
-                self.entries.len()
+                total
             )
         };
         ui.label(
@@ -253,15 +253,34 @@ impl FolderView {
                 let cols = ((available_width + TILE_PADDING) / (TILE_SIZE + TILE_PADDING))
                     .floor()
                     .max(1.0) as usize;
-                let rows = (self.entries.len() + cols - 1) / cols;
 
-                // Use a ui layout that wraps
+                // Compute scroll position and update scheduler
+                let scroll_offset = ui.clip_rect().min.y - ui.min_rect().min.y;
+                let viewport_height = ui.clip_rect().height();
+                let bumped =
+                    self.scheduler
+                        .update_visibility(scroll_offset, viewport_height, cols, CELL_SIZE);
+                if bumped {
+                    self.thumb_loader.sync_generation(self.scheduler.generation());
+                }
+
+                // Get work batch and send to thread pool
+                let batch = self.scheduler.get_work_batch();
+                if !batch.is_empty() {
+                    self.thumb_loader.send_batch(batch);
+                }
+
+                // Render tiles
+                let debug = debug_mode();
                 ui.horizontal_wrapped(|ui| {
                     ui.spacing_mut().item_spacing = egui::vec2(TILE_PADDING, TILE_PADDING);
 
-                    for (idx, entry) in self.entries.iter().enumerate() {
-                        let _ = rows; // suppress unused warning
-                        let response = Self::render_tile(ui, idx, entry);
+                    for idx in 0..self.scheduler.len() {
+                        let entry = self.scheduler.entry(idx);
+                        let texture = &self.textures[idx];
+                        let is_exif = entry.is_exif_quality;
+                        let response =
+                            Self::render_tile(ui, &entry.path, texture, debug && is_exif);
                         if response.clicked() {
                             clicked_index = Some(idx);
                         }
@@ -273,18 +292,22 @@ impl FolderView {
     }
 
     /// Render a single tile (thumbnail or placeholder + filename).
-    fn render_tile(ui: &mut egui::Ui, _idx: usize, entry: &ImageEntry) -> egui::Response {
-        let (rect, response) = ui.allocate_exact_size(
-            egui::vec2(TILE_SIZE, CELL_SIZE),
-            egui::Sense::click(),
-        );
+    fn render_tile(
+        ui: &mut egui::Ui,
+        path: &PathBuf,
+        texture: &Option<egui::TextureHandle>,
+        show_exif_badge: bool,
+    ) -> egui::Response {
+        let (rect, response) =
+            ui.allocate_exact_size(egui::vec2(TILE_SIZE, CELL_SIZE), egui::Sense::click());
 
         if ui.is_rect_visible(rect) {
             let painter = ui.painter_at(rect);
 
-            let thumb_rect = egui::Rect::from_min_size(rect.min, egui::vec2(TILE_SIZE, TILE_SIZE));
+            let thumb_rect =
+                egui::Rect::from_min_size(rect.min, egui::vec2(TILE_SIZE, TILE_SIZE));
 
-            if let Some(tex) = &entry.texture {
+            if let Some(tex) = texture {
                 // Draw the decoded thumbnail, centered within the tile
                 let tex_size = tex.size_vec2();
                 let scale = (TILE_SIZE / tex_size.x).min(TILE_SIZE / tex_size.y);
@@ -293,7 +316,7 @@ impl FolderView {
                 let offset_x = (TILE_SIZE - display_w) / 2.0;
                 let offset_y = (TILE_SIZE - display_h) / 2.0;
 
-                // Dark background behind thumbnail for letterboxing
+                // Dark background for letterboxing
                 painter.rect_filled(thumb_rect, 2.0, egui::Color32::from_rgb(24, 24, 24));
 
                 let img_rect = egui::Rect::from_min_size(
@@ -315,6 +338,27 @@ impl FolderView {
                         egui::Color32::from_rgba_premultiplied(255, 255, 255, 20),
                     );
                 }
+
+                // Debug: EXIF badge
+                if show_exif_badge {
+                    let badge_size = egui::vec2(32.0, 14.0);
+                    let badge_rect = egui::Rect::from_min_size(
+                        egui::pos2(thumb_rect.max.x - badge_size.x - 2.0, thumb_rect.min.y + 2.0),
+                        badge_size,
+                    );
+                    painter.rect_filled(
+                        badge_rect,
+                        2.0,
+                        egui::Color32::from_rgba_premultiplied(0, 180, 0, 200),
+                    );
+                    painter.text(
+                        badge_rect.center(),
+                        egui::Align2::CENTER_CENTER,
+                        "EXIF",
+                        egui::FontId::proportional(9.0),
+                        egui::Color32::WHITE,
+                    );
+                }
             } else {
                 // Gray placeholder
                 let bg_color = if response.hovered() {
@@ -325,12 +369,8 @@ impl FolderView {
                 painter.rect_filled(thumb_rect, 2.0, bg_color);
             }
 
-            // Filename label below the thumbnail
-            let filename = entry
-                .path
-                .file_name()
-                .unwrap_or_default()
-                .to_string_lossy();
+            // Filename label
+            let filename = path.file_name().unwrap_or_default().to_string_lossy();
             let label_rect = egui::Rect::from_min_size(
                 egui::pos2(rect.min.x, rect.min.y + TILE_SIZE + 2.0),
                 egui::vec2(TILE_SIZE, LABEL_HEIGHT),
@@ -347,30 +387,16 @@ impl FolderView {
         response
     }
 
-    /// Access entries (for testing).
+    /// Access scheduler (for testing).
     #[cfg(test)]
     pub fn entry_count(&self) -> usize {
-        self.entries.len()
-    }
-
-    /// Count of loaded thumbnails (for testing).
-    #[cfg(test)]
-    #[allow(dead_code)]
-    pub fn loaded_count(&self) -> usize {
-        self.entries.iter().filter(|e| e.state == ThumbState::Loaded).count()
+        self.scheduler.len()
     }
 
     /// Check if enumeration is done (for testing).
     #[cfg(test)]
     pub fn is_done(&self) -> bool {
         self.enum_done
-    }
-
-    /// Check if all thumbnails have been loaded (for testing).
-    #[cfg(test)]
-    #[allow(dead_code)]
-    pub fn thumbs_complete(&self) -> bool {
-        self.thumbs_done
     }
 }
 
@@ -419,11 +445,10 @@ mod tests {
     }
 
     #[test]
-    fn folder_view_enumerates_and_queues_thumbs() {
+    fn folder_view_enumerates_with_pending_state() {
         let dir = std::env::temp_dir().join(format!("iv_fv_test_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
 
-        // Create real image files so thumbnails can decode
         let img = image::RgbImage::from_fn(100, 100, |_, _| image::Rgb([128, 64, 32]));
         img.save(dir.join("a.jpg")).unwrap();
         img.save(dir.join("b.png")).unwrap();
@@ -431,7 +456,6 @@ mod tests {
 
         let mut fv = FolderView::new(dir.clone());
 
-        // Poll until enumeration done
         for _ in 0..100 {
             fv.poll_enumerator();
             if fv.is_done() {
@@ -443,8 +467,10 @@ mod tests {
         assert!(fv.is_done());
         assert_eq!(fv.entry_count(), 2);
 
-        // All entries should be in Loading state (queued for thumbnail)
-        assert!(fv.entries.iter().all(|e| e.state == ThumbState::Loading));
+        // Entries should be in Pending state (via scheduler)
+        for i in 0..fv.entry_count() {
+            assert_eq!(fv.scheduler.entry(i).state, ThumbState::Pending);
+        }
 
         let _ = std::fs::remove_dir_all(&dir);
     }

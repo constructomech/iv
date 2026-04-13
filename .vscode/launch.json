@@ -12,7 +12,8 @@
             "cwd": "${workspaceFolder}",
             "preLaunchTask": "build debug",
             "env": {
-                "RUST_LOG": "info"
+                "RUST_LOG": "info",
+                "IV_DEBUG": "1"
             }
         },
         {
@@ -26,7 +27,8 @@
             "cwd": "${workspaceFolder}",
             "preLaunchTask": "build release",
             "env": {
-                "RUST_LOG": "info"
+                "RUST_LOG": "info",
+                "IV_DEBUG": "1"
             }
         }
     ],

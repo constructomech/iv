@@ -118,11 +118,8 @@ impl App {
                     let size = [decoded.width as usize, decoded.height as usize];
                     let color_image =
                         egui::ColorImage::from_rgba_unmultiplied(size, &decoded.pixels);
-                    *texture = Some(ctx.load_texture(
-                        "image",
-                        color_image,
-                        egui::TextureOptions::LINEAR,
-                    ));
+                    *texture =
+                        Some(ctx.load_texture("image", color_image, egui::TextureOptions::LINEAR));
                     log::info!("Loaded {}x{} image", size[0], size[1]);
                 }
                 Err(msg) => {
