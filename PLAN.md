@@ -175,6 +175,7 @@
 ### Phase 8 — Polish & Robustness
 **Goal:** Handle real-world usage edge cases.
 
+- Adjustable thumbnail/tile size (keyboard shortcut or scroll-zoom in folder view)
 - Broken/corrupt images: show error icon, don't crash
 - Permission denied: skip gracefully
 - Non-image files: ignore without errors

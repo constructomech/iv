@@ -154,82 +154,138 @@ impl Scheduler {
         bumped
     }
 
+    /// Maximum background items to queue per batch (avoids flooding the work channel).
+    const MAX_BG_BATCH: usize = 4;
+
     /// Get the next batch of work items to send to decode workers.
     ///
-    /// Two-tier priority:
-    /// 1. **EXIF pass first**: All visible+buffer Pending tiles get EXIF-only work items.
-    ///    These read only ~256KB and are very fast (~1-3ms each).
-    /// 2. **Full decode second**: Only after NO Pending tiles remain in the visible range,
-    ///    ExifFailed tiles get full-decode work items.
-    ///
-    /// This ensures every visible tile gets a fast EXIF check before any slow
-    /// full decodes start, giving the best perceived performance.
+    /// Three-tier priority (strict — lower tier only when higher is empty):
+    /// 1. **EXIF pass**: Visible+buffer Pending tiles get EXIF-only work (~1-3ms each).
+    /// 2. **Full decode**: Visible+buffer ExifFailed tiles get full decode (~80ms each).
+    /// 3. **Background**: Off-screen tiles, capped to a small batch so on-screen
+    ///    work can preempt on the next frame.
     pub fn get_work_batch(&mut self) -> Vec<WorkItem> {
-        let (vis_start, vis_end) = self.visible_range;
-        if vis_end == 0 && self.entries.is_empty() {
+        if self.entries.is_empty() {
             return Vec::new();
         }
 
-        // Expand range by buffer rows
-        let buffer_tiles = BUFFER_ROWS * self.cols;
-        let load_start = vis_start.saturating_sub(buffer_tiles);
-        let load_end = (vis_end + buffer_tiles).min(self.entries.len());
+        let (vis_start, vis_end) = self.visible_range;
 
-        // Compute viewport center tile index for priority sorting
+        // Expand range by buffer rows for the "near" zone
+        let buffer_tiles = BUFFER_ROWS * self.cols;
+        let near_start = vis_start.saturating_sub(buffer_tiles);
+        let near_end = (vis_end + buffer_tiles).min(self.entries.len());
+
+        // Viewport center for priority sorting
         let center = if vis_start < vis_end {
             (vis_start + vis_end) / 2
         } else {
             0
         };
 
-        // Tier 0: Collect Pending tiles for EXIF-only pass
-        let mut exif_pending: Vec<(usize, usize)> = Vec::new();
-        let mut full_pending: Vec<(usize, usize)> = Vec::new();
+        // Collect near-screen tiles by state
+        let mut near_exif: Vec<(usize, usize)> = Vec::new();
+        let mut near_full: Vec<(usize, usize)> = Vec::new();
 
-        for idx in load_start..load_end {
+        for idx in near_start..near_end {
             let distance = if idx > center {
                 idx - center
             } else {
                 center - idx
             };
             match self.entries[idx].state {
-                ThumbState::Pending => exif_pending.push((idx, distance)),
-                ThumbState::ExifFailed => full_pending.push((idx, distance)),
+                ThumbState::Pending => near_exif.push((idx, distance)),
+                ThumbState::ExifFailed => near_full.push((idx, distance)),
                 _ => {}
             }
         }
 
-        // If there are Pending tiles, return EXIF-only work (fast pass first)
-        if !exif_pending.is_empty() {
-            exif_pending.sort_by_key(|&(_, distance)| distance);
-            let current_gen = self.generation;
-            return exif_pending
+        // Tier 0: Near-screen EXIF pass (highest priority)
+        if !near_exif.is_empty() {
+            near_exif.sort_by_key(|&(_, d)| d);
+            let g = self.generation;
+            return near_exif
                 .into_iter()
                 .map(|(idx, _)| {
                     self.entries[idx].state = ThumbState::ExifLoading;
                     WorkItem {
                         idx,
                         path: self.entries[idx].path.clone(),
-                        generation: current_gen,
+                        generation: g,
                         tier: WorkTier::ExifOnly,
                     }
                 })
                 .collect();
         }
 
-        // No more EXIF work — return full-decode work for ExifFailed tiles
-        if !full_pending.is_empty() {
-            full_pending.sort_by_key(|&(_, distance)| distance);
-            let current_gen = self.generation;
-            return full_pending
+        // Tier 1: Near-screen full decode
+        if !near_full.is_empty() {
+            near_full.sort_by_key(|&(_, d)| d);
+            let g = self.generation;
+            return near_full
                 .into_iter()
                 .map(|(idx, _)| {
                     self.entries[idx].state = ThumbState::FullLoading;
                     WorkItem {
                         idx,
                         path: self.entries[idx].path.clone(),
-                        generation: current_gen,
+                        generation: g,
                         tier: WorkTier::FullDecode,
+                    }
+                })
+                .collect();
+        }
+
+        // Tier 2: Background — off-screen tiles, sorted by distance from center
+        let mut bg_work: Vec<(usize, usize, WorkTier)> = Vec::new();
+
+        for idx in 0..self.entries.len() {
+            // Skip near-screen tiles (already handled above)
+            if idx >= near_start && idx < near_end {
+                continue;
+            }
+            let distance = if idx > center {
+                idx - center
+            } else {
+                center - idx
+            };
+            match self.entries[idx].state {
+                ThumbState::Pending => {
+                    bg_work.push((idx, distance, WorkTier::ExifOnly));
+                }
+                ThumbState::ExifFailed => {
+                    bg_work.push((idx, distance, WorkTier::FullDecode));
+                }
+                _ => {}
+            }
+        }
+
+        if !bg_work.is_empty() {
+            // Sort: EXIF work before full decode, then by distance
+            bg_work.sort_by_key(|&(_, d, ref tier)| {
+                let tier_priority = match tier {
+                    WorkTier::ExifOnly => 0,
+                    WorkTier::FullDecode => 1,
+                };
+                (tier_priority, d)
+            });
+
+            // Cap to a small batch so on-screen work can preempt next frame
+            bg_work.truncate(Self::MAX_BG_BATCH);
+
+            let g = self.generation;
+            return bg_work
+                .into_iter()
+                .map(|(idx, _, tier)| {
+                    self.entries[idx].state = match tier {
+                        WorkTier::ExifOnly => ThumbState::ExifLoading,
+                        WorkTier::FullDecode => ThumbState::FullLoading,
+                    };
+                    WorkItem {
+                        idx,
+                        path: self.entries[idx].path.clone(),
+                        generation: g,
+                        tier,
                     }
                 })
                 .collect();
@@ -672,5 +728,76 @@ mod tests {
         let (_, end3) = s.visible_range();
 
         assert!(end5 > end3, "fewer columns should mean fewer visible tiles");
+    }
+
+    #[test]
+    fn background_batch_is_capped() {
+        let mut s = make_scheduler(200);
+        // View tiles 0-20, buffer extends to ~35
+        s.update_visibility(0.0, CELL_H * 3.0, 5, CELL_H);
+
+        // Tier 0: drain all near-screen EXIF work
+        let batch0 = s.get_work_batch();
+        assert!(!batch0.is_empty());
+        assert!(batch0.iter().all(|w| w.tier == WorkTier::ExifOnly));
+
+        // Simulate all EXIF misses for near-screen
+        for item in &batch0 {
+            s.exif_failed(item.idx, t());
+        }
+
+        // Tier 1: drain near-screen full decode
+        let batch1 = s.get_work_batch();
+        assert!(!batch1.is_empty());
+        assert!(batch1.iter().all(|w| w.tier == WorkTier::FullDecode));
+        for item in &batch1 {
+            s.complete(item.idx, false, t());
+        }
+
+        // Tier 2: background work — should be capped
+        let bg_batch = s.get_work_batch();
+        assert!(!bg_batch.is_empty());
+        assert!(
+            bg_batch.len() <= Scheduler::MAX_BG_BATCH,
+            "background batch should be capped to {}, got {}",
+            Scheduler::MAX_BG_BATCH,
+            bg_batch.len()
+        );
+    }
+
+    #[test]
+    fn onscreen_preempts_background() {
+        let mut s = make_scheduler(200);
+        s.update_visibility(0.0, CELL_H * 3.0, 5, CELL_H);
+
+        // Drain near-screen EXIF
+        let batch0 = s.get_work_batch();
+        for item in &batch0 {
+            s.exif_failed(item.idx, t());
+        }
+
+        // Drain near-screen full decode
+        let batch1 = s.get_work_batch();
+        for item in &batch1 {
+            s.complete(item.idx, false, t());
+        }
+
+        // Get some background work
+        let bg = s.get_work_batch();
+        assert!(!bg.is_empty(), "should have background work");
+
+        // Now simulate new entries arriving in the visible range
+        // (e.g., enumerator found more files)
+        let new_idx = s.add_entry(std::path::PathBuf::from("new_visible.jpg"));
+
+        // Update visibility to include the new entry
+        s.update_visibility(0.0, CELL_H * 100.0, 5, CELL_H);
+
+        // Next batch should be the new on-screen EXIF work, not more background
+        let next = s.get_work_batch();
+        assert!(
+            next.iter().any(|w| w.idx == new_idx),
+            "new on-screen entry should be in the batch, not background work"
+        );
     }
 }

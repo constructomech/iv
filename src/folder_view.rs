@@ -1,8 +1,7 @@
 use eframe::egui;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc;
-use std::sync::{Arc, Mutex};
 use std::thread;
 
 use crate::app::DecodedImage;
@@ -59,28 +58,26 @@ enum ThumbResult {
 
 /// Manages a pool of worker threads that decode thumbnails.
 struct ThumbLoader {
-    work_tx: mpsc::Sender<WorkItem>,
-    result_rx: mpsc::Receiver<ThumbResult>,
+    work_tx: crossbeam_channel::Sender<WorkItem>,
+    result_rx: crossbeam_channel::Receiver<ThumbResult>,
     /// Shared generation counter — workers check this to skip stale items.
     generation: Arc<AtomicU64>,
 }
 
 impl ThumbLoader {
     fn new() -> Self {
-        let (work_tx, work_rx) = mpsc::channel::<WorkItem>();
-        let (result_tx, result_rx) = mpsc::channel();
+        let (work_tx, work_rx) = crossbeam_channel::unbounded::<WorkItem>();
+        let (result_tx, result_rx) = crossbeam_channel::unbounded();
         let generation = Arc::new(AtomicU64::new(0));
-
-        let work_rx = Arc::new(Mutex::new(work_rx));
 
         let num_workers = num_thumb_workers();
         log::info!("Starting {num_workers} thumbnail worker threads");
         for _ in 0..num_workers {
-            let work_rx = work_rx.clone();
+            let work_rx = work_rx.clone(); // crossbeam Receiver is Clone — no mutex needed
             let result_tx = result_tx.clone();
             let generation = generation.clone();
             thread::spawn(move || {
-                while let Ok(work) = work_rx.lock().unwrap().recv() {
+                while let Ok(work) = work_rx.recv() {
                     // Skip stale work
                     if work.generation < generation.load(Ordering::Relaxed) {
                         continue;
@@ -218,6 +215,10 @@ impl FolderView {
 
     /// Drain completed results from the loader and update scheduler/textures.
     fn poll_thumbnails(&mut self, ctx: &egui::Context) {
+        let mut exif_ok = 0u32;
+        let mut exif_miss = 0u32;
+        let mut full_ok = 0u32;
+        let mut full_err = 0u32;
         while let Ok(result) = self.thumb_loader.result_rx.try_recv() {
             match result {
                 ThumbResult::ExifOk {
@@ -225,6 +226,7 @@ impl FolderView {
                     image,
                     timings,
                 } => {
+                    exif_ok += 1;
                     if idx < self.scheduler.len() {
                         let size = [image.width as usize, image.height as usize];
                         let color_image =
@@ -239,6 +241,7 @@ impl FolderView {
                     }
                 }
                 ThumbResult::ExifMiss { idx, timings } => {
+                    exif_miss += 1;
                     if idx < self.scheduler.len() {
                         self.scheduler.exif_failed(idx, timings);
                     }
@@ -248,6 +251,7 @@ impl FolderView {
                     image,
                     timings,
                 } => {
+                    full_ok += 1;
                     if idx < self.scheduler.len() {
                         let size = [image.width as usize, image.height as usize];
                         let color_image =
@@ -262,6 +266,7 @@ impl FolderView {
                     }
                 }
                 ThumbResult::FullErr { idx, error } => {
+                    full_err += 1;
                     if idx < self.scheduler.len() {
                         log::warn!(
                             "Thumbnail failed for {}: {error}",
@@ -271,6 +276,17 @@ impl FolderView {
                     }
                 }
             }
+        }
+        let total = exif_ok + exif_miss + full_ok + full_err;
+        if total > 0 {
+            log::debug!(
+                "poll_thumbnails: {} results (exif_ok={}, exif_miss={}, full_ok={}, full_err={})",
+                total,
+                exif_ok,
+                exif_miss,
+                full_ok,
+                full_err
+            );
         }
     }
 
@@ -342,6 +358,11 @@ impl FolderView {
                 // Get work batch and send to thread pool
                 let batch = self.scheduler.get_work_batch();
                 if !batch.is_empty() {
+                    log::debug!(
+                        "Sending batch: {} items, tier={:?}",
+                        batch.len(),
+                        batch.first().map(|w| w.tier)
+                    );
                     self.thumb_loader.send_batch(batch);
                 }
 
