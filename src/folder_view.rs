@@ -26,7 +26,12 @@ const CELL_SIZE: f32 = TILE_SIZE + TILE_PADDING + LABEL_HEIGHT;
 /// Thumbnail decode resolution (pixels).
 const THUMB_DECODE_SIZE: u32 = 160;
 /// Number of thumbnail worker threads.
-const NUM_THUMB_WORKERS: usize = 4;
+/// Reserves 2 cores for UI + enumerator, uses the rest for decoding.
+fn num_thumb_workers() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get().saturating_sub(2).max(2))
+        .unwrap_or(4)
+}
 
 /// Result sent back from a thumbnail worker.
 struct ThumbResult {
@@ -50,7 +55,9 @@ impl ThumbLoader {
 
         let work_rx = Arc::new(Mutex::new(work_rx));
 
-        for _ in 0..NUM_THUMB_WORKERS {
+        let num_workers = num_thumb_workers();
+        log::info!("Starting {num_workers} thumbnail worker threads");
+        for _ in 0..num_workers {
             let work_rx = work_rx.clone();
             let result_tx = result_tx.clone();
             let generation = generation.clone();

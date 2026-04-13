@@ -3,7 +3,7 @@
 //! These helpers create real image files on disk in a temp directory so we can
 //! test the full load pipeline without shipping test fixtures.
 
-use image::{ImageBuffer, Rgba, RgbImage, ImageFormat};
+use image::{ImageBuffer, ImageFormat, RgbImage, Rgba};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 

@@ -1,0 +1,10 @@
+#!/bin/sh
+# Pre-commit hook: run cargo fmt and fail if there are unformatted files.
+# This prevents committing code that doesn't match rustfmt style.
+
+if ! cargo fmt -- --check 2>/dev/null; then
+    echo ""
+    echo "ERROR: Code is not formatted. Run 'cargo fmt' before committing."
+    echo ""
+    exit 1
+fi

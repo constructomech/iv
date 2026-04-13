@@ -1710,6 +1710,8 @@ dependencies = [
  "kamadak-exif",
  "log",
  "tempfile",
+ "zune-core",
+ "zune-jpeg",
 ]
 
 [[package]]

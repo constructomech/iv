@@ -68,5 +68,17 @@ fn main() {
             ),
             Err(e) => println!("  Progressive: error: {e}"),
         }
+
+        // Step 4: Direct decode_thumbnail (measures the zune-jpeg fast path)
+        let start = std::time::Instant::now();
+        match iv::decode_thumbnail(path, 160) {
+            Ok(img) => println!(
+                "  decode_thumbnail: {}x{} ({:.1}ms)",
+                img.width,
+                img.height,
+                start.elapsed().as_secs_f64() * 1000.0
+            ),
+            Err(e) => println!("  decode_thumbnail: error: {e}"),
+        }
     }
 }

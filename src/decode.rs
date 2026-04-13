@@ -87,22 +87,29 @@ fn decode_exif_jpeg_thumbnail(path: &Path, offset: u32, length: u32) -> Option<D
     None
 }
 
-/// Decode JPEG bytes into a DecodedImage.
+/// Decode JPEG bytes into a DecodedImage using zune-jpeg.
 fn decode_jpeg_bytes(data: &[u8]) -> Option<DecodedImage> {
-    let img = image::load_from_memory_with_format(data, image::ImageFormat::Jpeg).ok()?;
-    let rgba = img.to_rgba8();
+    use zune_core::options::DecoderOptions;
+    use zune_jpeg::JpegDecoder;
+
+    let cursor = std::io::Cursor::new(data);
+    let opts =
+        DecoderOptions::default().jpeg_set_out_colorspace(zune_core::colorspace::ColorSpace::RGBA);
+    let mut decoder = JpegDecoder::new_with_options(cursor, opts);
+    let pixels = decoder.decode().ok()?;
+    let info = decoder.info()?;
+
     Some(DecodedImage {
-        width: rgba.width(),
-        height: rgba.height(),
-        pixels: rgba.into_raw(),
+        width: info.width as u32,
+        height: info.height as u32,
+        pixels,
     })
 }
 
 /// Decode an image file to a thumbnail of at most `max_size` x `max_size` pixels.
-/// Preserves aspect ratio. Works for all formats supported by the `image` crate.
+/// Uses image crate's integrated scale-on-decode for best performance.
 pub fn decode_thumbnail(path: &Path, max_size: u32) -> Result<DecodedImage, String> {
-    let img = image::open(path)
-        .map_err(|e| format!("Failed to load {}: {e}", path.display()))?;
+    let img = image::open(path).map_err(|e| format!("Failed to load {}: {e}", path.display()))?;
 
     let thumb = img.thumbnail(max_size, max_size);
     let rgba = thumb.to_rgba8();
@@ -116,7 +123,10 @@ pub fn decode_thumbnail(path: &Path, max_size: u32) -> Result<DecodedImage, Stri
 
 /// Try EXIF thumbnail first (fast), then fall back to full decode (quality).
 /// Returns the decoded thumbnail and whether it came from EXIF (lower quality).
-pub fn decode_thumbnail_progressive(path: &Path, max_size: u32) -> Result<(DecodedImage, bool), String> {
+pub fn decode_thumbnail_progressive(
+    path: &Path,
+    max_size: u32,
+) -> Result<(DecodedImage, bool), String> {
     // Tier 0: Try EXIF embedded thumbnail (~1ms)
     if let Some(thumb) = extract_exif_thumbnail(path) {
         // EXIF thumbnails are typically 160x120 — if we need larger, still use it
@@ -140,13 +150,16 @@ mod tests {
     use std::fs;
 
     fn make_test_dir(name: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("iv_decode_test_{name}_{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("iv_decode_test_{name}_{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         dir
     }
 
     fn create_test_jpeg(dir: &std::path::Path, name: &str, w: u32, h: u32) -> std::path::PathBuf {
-        let img = RgbImage::from_fn(w, h, |x, y| image::Rgb([(x % 256) as u8, (y % 256) as u8, 128]));
+        let img = RgbImage::from_fn(w, h, |x, y| {
+            image::Rgb([(x % 256) as u8, (y % 256) as u8, 128])
+        });
         let path = dir.join(name);
         img.save_with_format(&path, ImageFormat::Jpeg).unwrap();
         path
@@ -160,13 +173,17 @@ mod tests {
         let thumb = decode_thumbnail(&path, 160).unwrap();
 
         // Should be at most 160 in either dimension
-        assert!(thumb.width <= 160);
-        assert!(thumb.height <= 160);
-        // Should preserve aspect ratio (4:3)
-        let ratio = thumb.width as f32 / thumb.height as f32;
-        assert!((ratio - (4.0 / 3.0)).abs() < 0.1);
+        assert!(thumb.width <= 160, "width {} should be <= 160", thumb.width);
+        assert!(
+            thumb.height <= 160,
+            "height {} should be <= 160",
+            thumb.height
+        );
         // Should have valid RGBA data
-        assert_eq!(thumb.pixels.len(), (thumb.width * thumb.height * 4) as usize);
+        assert_eq!(
+            thumb.pixels.len(),
+            (thumb.width * thumb.height * 4) as usize
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }

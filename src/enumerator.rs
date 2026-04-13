@@ -113,7 +113,10 @@ mod tests {
 
         assert_eq!(found.len(), 2);
         assert_eq!(done_count, Some(2));
-        let names: Vec<_> = found.iter().filter_map(|p| p.file_name().map(|n| n.to_string_lossy().to_string())).collect();
+        let names: Vec<_> = found
+            .iter()
+            .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
+            .collect();
         assert!(names.contains(&"photo.jpg".to_string()));
         assert!(names.contains(&"icon.png".to_string()));
 

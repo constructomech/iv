@@ -7,6 +7,8 @@ edition = "2024"
 eframe = "0.31"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp", "tiff", "bmp"] }
 kamadak-exif = "0.6"
+zune-jpeg = "0.5"
+zune-core = "0.5"
 log = "0.4"
 env_logger = "0.11"
 
