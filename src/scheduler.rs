@@ -117,9 +117,7 @@ impl Scheduler {
         let mut bumped = false;
 
         // If scroll changed significantly, bump generation and reset Loading→Pending
-        if old_range != self.visible_range
-            && (scroll_y - self.last_scroll_y).abs() > row_height
-        {
+        if old_range != self.visible_range && (scroll_y - self.last_scroll_y).abs() > row_height {
             self.generation += 1;
             self.last_scroll_y = scroll_y;
 
@@ -306,7 +304,9 @@ mod tests {
             assert!(
                 dist >= prev_dist,
                 "work items should be ordered by distance from center: idx={} dist={} prev_dist={}",
-                item.idx, dist, prev_dist
+                item.idx,
+                dist,
+                prev_dist
             );
             prev_dist = dist;
         }
@@ -517,7 +517,10 @@ mod tests {
         // Bump generation
         s.update_visibility(CELL_H * 10.0, CELL_H * 3.0, 5, CELL_H);
         assert!(s.should_skip(0), "generation 0 should be stale after bump");
-        assert!(!s.should_skip(s.generation()), "current gen should not be stale");
+        assert!(
+            !s.should_skip(s.generation()),
+            "current gen should not be stale"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -549,7 +552,10 @@ mod tests {
         // Re-run visibility (same scroll position) — should pick up new entries
         s.update_visibility(0.0, CELL_H * 3.0, 5, CELL_H);
         let batch2 = s.get_work_batch();
-        assert!(!batch2.is_empty(), "new entries in visible range should be scheduled");
+        assert!(
+            !batch2.is_empty(),
+            "new entries in visible range should be scheduled"
+        );
     }
 
     #[test]
@@ -583,7 +589,7 @@ mod tests {
         s.update_visibility(0.0, CELL_H * 3.0, 5, CELL_H);
         let (_, end5) = s.visible_range();
 
-        // 3 columns: visible = 9 tiles (3 rows)  
+        // 3 columns: visible = 9 tiles (3 rows)
         s.update_visibility(0.0, CELL_H * 3.0, 3, CELL_H);
         let (_, end3) = s.visible_range();
 

@@ -1,0 +1,72 @@
+/// Quick diagnostic: check EXIF thumbnail extraction on real files.
+/// Run with: cargo run --example exif_diag -- <file1> <file2> ...
+
+fn main() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.is_empty() {
+        eprintln!("Usage: exif_diag <image-path> ...");
+        std::process::exit(1);
+    }
+
+    for path_str in &args {
+        let path = std::path::Path::new(path_str);
+        println!("\n=== {} ===", path.display());
+
+        // Step 1: Can we read EXIF at all?
+        match std::fs::File::open(path) {
+            Ok(file) => {
+                let mut reader = std::io::BufReader::new(&file);
+                let exif_reader = exif::Reader::new();
+                match exif_reader.read_from_container(&mut reader) {
+                    Ok(exif) => {
+                        println!("  EXIF: found ({} fields)", exif.fields().count());
+
+                        // Check for thumbnail tags in all IFDs
+                        for field in exif.fields() {
+                            if field.tag == exif::Tag::JPEGInterchangeFormat
+                                || field.tag == exif::Tag::JPEGInterchangeFormatLength
+                            {
+                                println!(
+                                    "  IFD {:?}: {} = {:?}",
+                                    field.ifd_num,
+                                    field.tag,
+                                    field.value.get_uint(0)
+                                );
+                            }
+                        }
+                    }
+                    Err(e) => println!("  EXIF: parse error: {e}"),
+                }
+            }
+            Err(e) => println!("  Can't open: {e}"),
+        }
+
+        // Step 2: Try our extraction
+        let start = std::time::Instant::now();
+        match iv::extract_exif_thumbnail(path) {
+            Some(img) => println!(
+                "  EXIF thumb: {}x{} ({:.1}ms)",
+                img.width,
+                img.height,
+                start.elapsed().as_secs_f64() * 1000.0
+            ),
+            None => println!(
+                "  EXIF thumb: None ({:.1}ms)",
+                start.elapsed().as_secs_f64() * 1000.0
+            ),
+        }
+
+        // Step 3: Progressive result
+        let start = std::time::Instant::now();
+        match iv::decode_thumbnail_progressive(path, 160) {
+            Ok((img, is_exif)) => println!(
+                "  Progressive: {}x{}, is_exif={} ({:.1}ms)",
+                img.width,
+                img.height,
+                is_exif,
+                start.elapsed().as_secs_f64() * 1000.0
+            ),
+            Err(e) => println!("  Progressive: error: {e}"),
+        }
+    }
+}

@@ -230,11 +230,7 @@ impl FolderView {
                 total
             )
         } else {
-            format!(
-                "{} — scanning… ({} found)",
-                self.folder.display(),
-                total
-            )
+            format!("{} — scanning… ({} found)", self.folder.display(), total)
         };
         ui.label(
             egui::RichText::new(status)
@@ -257,11 +253,15 @@ impl FolderView {
                 // Compute scroll position and update scheduler
                 let scroll_offset = ui.clip_rect().min.y - ui.min_rect().min.y;
                 let viewport_height = ui.clip_rect().height();
-                let bumped =
-                    self.scheduler
-                        .update_visibility(scroll_offset, viewport_height, cols, CELL_SIZE);
+                let bumped = self.scheduler.update_visibility(
+                    scroll_offset,
+                    viewport_height,
+                    cols,
+                    CELL_SIZE,
+                );
                 if bumped {
-                    self.thumb_loader.sync_generation(self.scheduler.generation());
+                    self.thumb_loader
+                        .sync_generation(self.scheduler.generation());
                 }
 
                 // Get work batch and send to thread pool
@@ -304,8 +304,7 @@ impl FolderView {
         if ui.is_rect_visible(rect) {
             let painter = ui.painter_at(rect);
 
-            let thumb_rect =
-                egui::Rect::from_min_size(rect.min, egui::vec2(TILE_SIZE, TILE_SIZE));
+            let thumb_rect = egui::Rect::from_min_size(rect.min, egui::vec2(TILE_SIZE, TILE_SIZE));
 
             if let Some(tex) = texture {
                 // Draw the decoded thumbnail, centered within the tile
@@ -343,7 +342,10 @@ impl FolderView {
                 if show_exif_badge {
                     let badge_size = egui::vec2(32.0, 14.0);
                     let badge_rect = egui::Rect::from_min_size(
-                        egui::pos2(thumb_rect.max.x - badge_size.x - 2.0, thumb_rect.min.y + 2.0),
+                        egui::pos2(
+                            thumb_rect.max.x - badge_size.x - 2.0,
+                            thumb_rect.min.y + 2.0,
+                        ),
                         badge_size,
                     );
                     painter.rect_filled(

@@ -199,6 +199,7 @@
 | Sorting (by name, date, size) | After Phase 6 | Requires reading metadata for all files |
 | Filtering | After Phase 6 | By date range, file type, etc. |
 | Multi-folder / recursive | After Phase 6 | Walk subdirectories |
+| Embed EXIF thumbnails | After Phase 7 | Opt-in CLI command (`iv --embed-thumbnails <folder>`) to losslessly inject EXIF thumbnails into source JPEGs that lack them. One-time cost, permanent speedup. Never automatic. |
 | RAW demosaicing | Far future | Embedded JPEG previews cover viewing. Only needed for "develop" features. |
 | Video thumbnail support | Far future | Different decode pipeline entirely |
 
