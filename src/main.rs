@@ -6,6 +6,7 @@ mod app;
 mod decode;
 mod enumerator;
 mod folder_view;
+mod image_view;
 mod scheduler;
 
 fn main() {

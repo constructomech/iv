@@ -519,6 +519,13 @@ impl FolderView {
     pub fn is_done(&self) -> bool {
         self.enum_done
     }
+
+    /// Get all entry paths (for image view navigation).
+    pub fn entry_paths(&self) -> Vec<PathBuf> {
+        (0..self.scheduler.len())
+            .map(|i| self.scheduler.entry(i).path.clone())
+            .collect()
+    }
 }
 
 /// Truncate a filename for display, keeping extension visible.

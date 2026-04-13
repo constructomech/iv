@@ -2,6 +2,7 @@ use eframe::egui;
 use std::path::{Path, PathBuf};
 
 use crate::folder_view::FolderView;
+use crate::image_view::ImageView;
 
 // ---------------------------------------------------------------------------
 // Pure (testable) image-loading logic — no GPU context needed
@@ -70,18 +71,22 @@ pub fn is_image_file(path: &Path) -> bool {
 
 /// What the app is currently showing.
 enum Mode {
-    /// Single image view (Phase 0).
+    /// Single image view (opened directly from CLI).
     Image {
         path: PathBuf,
         texture: Option<egui::TextureHandle>,
         error: Option<String>,
     },
-    /// Folder grid view (Phase 1).
+    /// Folder grid view.
     Folder(FolderView),
+    /// Full-resolution image view (opened from folder grid).
+    ImageView(ImageView),
 }
 
 pub struct App {
     mode: Mode,
+    /// Folder path stored for returning from image view.
+    folder_path: Option<PathBuf>,
 }
 
 impl App {
@@ -93,13 +98,16 @@ impl App {
                 texture: None,
                 error: None,
             },
+            folder_path: None,
         }
     }
 
     /// Open the app pointing at a folder (grid view).
     pub fn new_folder(_cc: &eframe::CreationContext<'_>, folder: PathBuf) -> Self {
+        let fv = FolderView::new(folder.clone());
         Self {
-            mode: Mode::Folder(FolderView::new(folder)),
+            mode: Mode::Folder(fv),
+            folder_path: Some(folder),
         }
     }
 
@@ -166,6 +174,9 @@ impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let frame_style = egui::Frame::new().fill(egui::Color32::from_rgb(24, 24, 24));
 
+        // Check for mode transition
+        let mut transition = None;
+
         egui::CentralPanel::default()
             .frame(frame_style)
             .show(ctx, |ui| match &mut self.mode {
@@ -177,10 +188,26 @@ impl eframe::App for App {
                     Self::show_image(ctx, ui, path, texture, error);
                 }
                 Mode::Folder(folder_view) => {
-                    let _clicked = folder_view.show(ctx, ui);
-                    // Phase 5 will handle click → image view transition
+                    if let Some(clicked_idx) = folder_view.show(ctx, ui) {
+                        let paths = folder_view.entry_paths();
+                        if !paths.is_empty() {
+                            transition = Some(Mode::ImageView(ImageView::new(paths, clicked_idx)));
+                        }
+                    }
+                }
+                Mode::ImageView(image_view) => {
+                    if image_view.show(ctx, ui) {
+                        // Go back to folder view
+                        if let Some(folder) = &self.folder_path {
+                            transition = Some(Mode::Folder(FolderView::new(folder.clone())));
+                        }
+                    }
                 }
             });
+
+        if let Some(new_mode) = transition {
+            self.mode = new_mode;
+        }
     }
 }
 
