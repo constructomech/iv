@@ -15,6 +15,41 @@ pub struct DecodeTimings {
 /// Maximum bytes to read for an EXIF-only check (256KB covers all EXIF headers).
 const EXIF_READ_SIZE: usize = 256 * 1024;
 
+/// Read the EXIF Orientation tag from file bytes.
+/// Returns 1 (normal) if no orientation is found.
+/// Values 1-8 per EXIF spec:
+///   1=normal, 2=flip-h, 3=rotate180, 4=flip-v,
+///   5=transpose, 6=rotate90, 7=transverse, 8=rotate270
+pub fn read_exif_orientation(data: &[u8]) -> u32 {
+    let cursor = Cursor::new(data);
+    let exif_reader = exif::Reader::new();
+    if let Ok(exif) = exif_reader.read_from_container(&mut std::io::BufReader::new(cursor)) {
+        if let Some(field) = exif.get_field(exif::Tag::Orientation, exif::In::PRIMARY) {
+            if let Some(v) = field.value.get_uint(0) {
+                if (1..=8).contains(&v) {
+                    return v;
+                }
+            }
+        }
+    }
+    1
+}
+
+/// Apply EXIF orientation transform to an image.
+pub fn apply_orientation(img: image::DynamicImage, orientation: u32) -> image::DynamicImage {
+    match orientation {
+        1 => img,                     // Normal
+        2 => img.fliph(),             // Mirror horizontal
+        3 => img.rotate180(),         // Rotate 180
+        4 => img.flipv(),             // Mirror vertical
+        5 => img.rotate90().fliph(),  // Transpose
+        6 => img.rotate90(),          // Rotate 90 CW
+        7 => img.rotate270().fliph(), // Transverse
+        8 => img.rotate270(),         // Rotate 270 CW
+        _ => img,
+    }
+}
+
 /// Tier 0: Try EXIF thumbnail extraction only.
 /// Reads at most 256KB from disk — very fast, especially on network shares.
 /// Returns Some(image) if an embedded JPEG thumbnail was found.
@@ -30,7 +65,22 @@ pub fn try_exif_only(path: &Path) -> (Option<DecodedImage>, DecodeTimings) {
         let mut buf = vec![0u8; read_len];
         std::io::Read::read_exact(&mut file, &mut buf).ok()?;
 
-        extract_exif_thumbnail(&buf)
+        let orientation = read_exif_orientation(&buf);
+        let mut decoded = extract_exif_thumbnail(&buf)?;
+
+        // Apply orientation if needed
+        if orientation != 1 {
+            let img = image::RgbaImage::from_raw(decoded.width, decoded.height, decoded.pixels)?;
+            let oriented = apply_orientation(image::DynamicImage::ImageRgba8(img), orientation);
+            let rgba = oriented.to_rgba8();
+            decoded = DecodedImage {
+                width: rgba.width(),
+                height: rgba.height(),
+                pixels: rgba.into_raw(),
+            };
+        }
+
+        Some(decoded)
     })();
 
     timings.exif_ms = start.elapsed().as_secs_f64() * 1000.0;
@@ -48,7 +98,9 @@ pub fn decode_full_thumbnail(
 
     let data =
         std::fs::read(path).map_err(|e| format!("Failed to read {}: {e}", path.display()))?;
+    let orientation = read_exif_orientation(&data);
     let img = image::load_from_memory(&data).map_err(|e| format!("Failed to decode: {e}"))?;
+    let img = apply_orientation(img, orientation);
     let thumb = img.thumbnail(max_size, max_size);
     let rgba = thumb.to_rgba8();
 

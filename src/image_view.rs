@@ -23,10 +23,6 @@ pub struct ImageView {
     fit_mode: bool,
     /// Background loader for the current image.
     loader: Option<mpsc::Receiver<Result<DecodedImage, String>>>,
-    /// Pre-decoded adjacent images (index → texture).
-    preloaded: std::collections::HashMap<usize, egui::TextureHandle>,
-    /// Whether drag is in progress.
-    dragging: bool,
 }
 
 impl ImageView {
@@ -40,8 +36,6 @@ impl ImageView {
             pan: egui::Vec2::ZERO,
             fit_mode: true,
             loader: None,
-            preloaded: std::collections::HashMap::new(),
-            dragging: false,
         };
         view.start_loading(start_index);
         view
@@ -50,11 +44,6 @@ impl ImageView {
     /// Start loading an image on a background thread.
     fn start_loading(&mut self, index: usize) {
         if index >= self.paths.len() {
-            return;
-        }
-
-        // Check if already preloaded
-        if self.preloaded.contains_key(&index) {
             return;
         }
 
@@ -129,21 +118,9 @@ impl ImageView {
         self.loader = None;
         self.reset_view();
 
-        // Check if we preloaded this one (we can't — texture upload needs UI thread)
-        // Just start loading
+        self.loader = None;
+        self.reset_view();
         self.start_loading(index);
-    }
-
-    fn navigate_prev(&mut self) {
-        if self.current > 0 {
-            self.navigate_to(self.current - 1);
-        }
-    }
-
-    fn navigate_next(&mut self) {
-        if self.current + 1 < self.paths.len() {
-            self.navigate_to(self.current + 1);
-        }
     }
 
     fn reset_view(&mut self) {

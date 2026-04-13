@@ -19,9 +19,14 @@ pub struct DecodedImage {
     pub height: u32,
 }
 
-/// Load an image file from disk and decode it to RGBA.
+/// Load an image file from disk and decode it to RGBA, applying EXIF orientation.
 pub fn load_image(path: &Path) -> Result<DecodedImage, String> {
-    let img = image::open(path).map_err(|e| format!("Failed to load {}: {e}", path.display()))?;
+    let data =
+        std::fs::read(path).map_err(|e| format!("Failed to read {}: {e}", path.display()))?;
+    let orientation = crate::decode::read_exif_orientation(&data);
+    let img = image::load_from_memory(&data)
+        .map_err(|e| format!("Failed to decode {}: {e}", path.display()))?;
+    let img = crate::decode::apply_orientation(img, orientation);
     let rgba = img.to_rgba8();
     Ok(DecodedImage {
         width: rgba.width(),
@@ -327,7 +332,7 @@ mod tests {
     fn load_image_nonexistent_file() {
         let result = load_image(Path::new("does_not_exist.jpg"));
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("Failed to load"));
+        assert!(result.unwrap_err().contains("Failed to read"));
     }
 
     #[test]
