@@ -1,5 +1,7 @@
 use std::path::PathBuf;
 
+use crate::decode::DecodeTimings;
+
 /// Number of rows to buffer above/below the viewport for prefetching.
 const BUFFER_ROWS: usize = 3;
 
@@ -23,6 +25,8 @@ pub struct EntryState {
     pub state: ThumbState,
     /// True if the current thumbnail came from EXIF (lower quality).
     pub is_exif_quality: bool,
+    /// Decode timing data (populated after load completes).
+    pub timings: Option<DecodeTimings>,
 }
 
 /// A work item to be sent to a decode worker.
@@ -67,6 +71,7 @@ impl Scheduler {
             path,
             state: ThumbState::Pending,
             is_exif_quality: false,
+            timings: None,
         });
         idx
     }
@@ -189,10 +194,11 @@ impl Scheduler {
     /// Mark a tile as successfully loaded.
     /// Always accepts results — even from an older generation,
     /// because the decoded pixels are valid regardless.
-    pub fn complete(&mut self, idx: usize, is_exif: bool) {
+    pub fn complete(&mut self, idx: usize, is_exif: bool, timings: DecodeTimings) {
         if idx < self.entries.len() {
             self.entries[idx].state = ThumbState::Loaded;
             self.entries[idx].is_exif_quality = is_exif;
+            self.entries[idx].timings = Some(timings);
         }
     }
 
@@ -229,6 +235,10 @@ impl Scheduler {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn t() -> DecodeTimings {
+        DecodeTimings::default()
+    }
 
     fn make_scheduler(n: usize) -> Scheduler {
         let mut s = Scheduler::new();
@@ -424,7 +434,7 @@ mod tests {
         assert!(s.generation() > first_gen);
 
         // Complete with OLD generation — should still be accepted
-        s.complete(first_idx, false);
+        s.complete(first_idx, false, t());
         assert_eq!(
             s.entry(first_idx).state,
             ThumbState::Loaded,
@@ -440,7 +450,7 @@ mod tests {
 
         // Complete a few
         for item in batch.iter().take(5) {
-            s.complete(item.idx, false);
+            s.complete(item.idx, false, t());
         }
 
         // Scroll away and back
@@ -568,7 +578,7 @@ mod tests {
         assert!(s.has_pending_work()); // Now Loading
 
         for item in &batch {
-            s.complete(item.idx, false);
+            s.complete(item.idx, false, t());
         }
         assert!(!s.has_pending_work()); // All done
     }
@@ -577,7 +587,7 @@ mod tests {
     fn complete_and_fail_with_out_of_bounds_idx() {
         let mut s = make_scheduler(5);
         // Should not panic
-        s.complete(999, false);
+        s.complete(999, false, t());
         s.fail(999);
     }
 

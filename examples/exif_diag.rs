@@ -59,12 +59,14 @@ fn main() {
         // Step 3: Progressive result
         let start = std::time::Instant::now();
         match iv::decode_thumbnail_progressive(path, 160) {
-            Ok((img, is_exif)) => println!(
-                "  Progressive: {}x{}, is_exif={} ({:.1}ms)",
+            Ok((img, is_exif, timings)) => println!(
+                "  Progressive: {}x{}, is_exif={} ({:.1}ms total, exif={:.1}ms, full={:.1}ms)",
                 img.width,
                 img.height,
                 is_exif,
-                start.elapsed().as_secs_f64() * 1000.0
+                start.elapsed().as_secs_f64() * 1000.0,
+                timings.exif_ms,
+                timings.full_ms,
             ),
             Err(e) => println!("  Progressive: error: {e}"),
         }

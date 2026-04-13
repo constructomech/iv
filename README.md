@@ -129,3 +129,30 @@ iv/
 ```
 
 See [PLAN.md](PLAN.md) for the full development roadmap.
+
+### Git Hooks
+
+After cloning, activate the pre-commit format check:
+
+```bash
+git config core.hooksPath .githooks
+```
+
+This runs `cargo fmt --check` before each commit. If formatting fails, run `cargo fmt` and retry.
+
+### Debug Mode
+
+Set `IV_DEBUG=1` to show decode timing overlays on thumbnails:
+
+```bash
+# PowerShell
+$env:IV_DEBUG = "1"
+iv path/to/photos/
+
+# Bash
+IV_DEBUG=1 iv path/to/photos/
+```
+
+The overlay shows:
+- **EXIF X.Xms** — Time to extract and decode the embedded EXIF thumbnail (green = used)
+- **Full X.Xms** — Time for full decode + downscale (shown when EXIF was not available)

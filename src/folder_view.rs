@@ -7,6 +7,7 @@ use std::thread;
 
 use crate::app::DecodedImage;
 use crate::decode;
+use crate::decode::DecodeTimings;
 use crate::enumerator::{self, EnumHandle, EnumMessage};
 use crate::scheduler::{Scheduler, ThumbState, WorkItem};
 
@@ -36,7 +37,7 @@ fn num_thumb_workers() -> usize {
 /// Result sent back from a thumbnail worker.
 struct ThumbResult {
     idx: usize,
-    result: Result<(DecodedImage, bool), String>,
+    result: Result<(DecodedImage, bool, DecodeTimings), String>,
 }
 
 /// Manages a pool of worker threads that decode thumbnails.
@@ -182,7 +183,7 @@ impl FolderView {
         while let Ok(result) = self.thumb_loader.result_rx.try_recv() {
             if result.idx < self.scheduler.len() {
                 match result.result {
-                    Ok((decoded, is_exif)) => {
+                    Ok((decoded, is_exif, timings)) => {
                         let size = [decoded.width as usize, decoded.height as usize];
                         let color_image =
                             egui::ColorImage::from_rgba_unmultiplied(size, &decoded.pixels);
@@ -192,7 +193,7 @@ impl FolderView {
                             egui::TextureOptions::LINEAR,
                         );
                         self.textures[result.idx] = Some(texture);
-                        self.scheduler.complete(result.idx, is_exif);
+                        self.scheduler.complete(result.idx, is_exif, timings);
                     }
                     Err(e) => {
                         log::warn!(
@@ -285,9 +286,8 @@ impl FolderView {
                     for idx in 0..self.scheduler.len() {
                         let entry = self.scheduler.entry(idx);
                         let texture = &self.textures[idx];
-                        let is_exif = entry.is_exif_quality;
-                        let response =
-                            Self::render_tile(ui, &entry.path, texture, debug && is_exif);
+                        let debug_info = if debug { entry.timings.as_ref() } else { None };
+                        let response = Self::render_tile(ui, &entry.path, texture, debug_info);
                         if response.clicked() {
                             clicked_index = Some(idx);
                         }
@@ -303,7 +303,7 @@ impl FolderView {
         ui: &mut egui::Ui,
         path: &PathBuf,
         texture: &Option<egui::TextureHandle>,
-        show_exif_badge: bool,
+        debug_timings: Option<&DecodeTimings>,
     ) -> egui::Response {
         let (rect, response) =
             ui.allocate_exact_size(egui::vec2(TILE_SIZE, CELL_SIZE), egui::Sense::click());
@@ -345,28 +345,52 @@ impl FolderView {
                     );
                 }
 
-                // Debug: EXIF badge
-                if show_exif_badge {
-                    let badge_size = egui::vec2(32.0, 14.0);
+                // Debug: timing overlay
+                if let Some(timings) = debug_timings {
+                    let mut lines: Vec<(String, egui::Color32)> = Vec::new();
+
+                    // EXIF line — green if it was used, gray if attempted but failed
+                    if timings.full_ms == 0.0 {
+                        // EXIF was used (no full decode needed)
+                        lines.push((
+                            format!("EXIF {:.1}ms", timings.exif_ms),
+                            egui::Color32::from_rgb(80, 220, 80),
+                        ));
+                    } else {
+                        // EXIF attempted but not found, show in gray
+                        lines.push((
+                            format!("EXIF {:.1}ms", timings.exif_ms),
+                            egui::Color32::from_rgb(140, 140, 140),
+                        ));
+                        lines.push((
+                            format!("Full {:.1}ms", timings.full_ms),
+                            egui::Color32::from_rgb(220, 180, 80),
+                        ));
+                    }
+
+                    let line_h = 13.0;
+                    let badge_h = lines.len() as f32 * line_h + 4.0;
+                    let badge_w = 80.0;
                     let badge_rect = egui::Rect::from_min_size(
-                        egui::pos2(
-                            thumb_rect.max.x - badge_size.x - 2.0,
-                            thumb_rect.min.y + 2.0,
-                        ),
-                        badge_size,
+                        egui::pos2(thumb_rect.max.x - badge_w - 2.0, thumb_rect.min.y + 2.0),
+                        egui::vec2(badge_w, badge_h),
                     );
                     painter.rect_filled(
                         badge_rect,
                         2.0,
-                        egui::Color32::from_rgba_premultiplied(0, 180, 0, 200),
+                        egui::Color32::from_rgba_premultiplied(0, 0, 0, 180),
                     );
-                    painter.text(
-                        badge_rect.center(),
-                        egui::Align2::CENTER_CENTER,
-                        "EXIF",
-                        egui::FontId::proportional(9.0),
-                        egui::Color32::WHITE,
-                    );
+
+                    for (i, (text, color)) in lines.iter().enumerate() {
+                        let y = badge_rect.min.y + 2.0 + i as f32 * line_h + line_h / 2.0;
+                        painter.text(
+                            egui::pos2(badge_rect.center().x, y),
+                            egui::Align2::CENTER_CENTER,
+                            text,
+                            egui::FontId::monospace(9.0),
+                            *color,
+                        );
+                    }
                 }
             } else {
                 // Gray placeholder

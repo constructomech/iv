@@ -3,6 +3,15 @@ use std::path::Path;
 
 use crate::app::DecodedImage;
 
+/// Timing data from the decode pipeline.
+#[derive(Debug, Clone, Default)]
+pub struct DecodeTimings {
+    /// Time spent attempting EXIF thumbnail extraction (always measured).
+    pub exif_ms: f64,
+    /// Time spent on full decode + downscale (0 if EXIF succeeded).
+    pub full_ms: f64,
+}
+
 /// Try to extract the EXIF embedded thumbnail from an image file.
 /// This reads only the header (~64KB) and is very fast.
 /// Returns None if no embedded thumbnail is found.
@@ -122,21 +131,28 @@ pub fn decode_thumbnail(path: &Path, max_size: u32) -> Result<DecodedImage, Stri
 }
 
 /// Try EXIF thumbnail first (fast), then fall back to full decode (quality).
-/// Returns the decoded thumbnail and whether it came from EXIF (lower quality).
+/// Returns the decoded thumbnail, whether it came from EXIF, and timing data.
 pub fn decode_thumbnail_progressive(
     path: &Path,
     max_size: u32,
-) -> Result<(DecodedImage, bool), String> {
+) -> Result<(DecodedImage, bool, DecodeTimings), String> {
+    let mut timings = DecodeTimings::default();
+
     // Tier 0: Try EXIF embedded thumbnail (~1ms)
-    if let Some(thumb) = extract_exif_thumbnail(path) {
-        // EXIF thumbnails are typically 160x120 — if we need larger, still use it
-        // as a fast preview. The caller can request a higher quality decode later.
-        return Ok((thumb, true));
+    let exif_start = std::time::Instant::now();
+    let exif_result = extract_exif_thumbnail(path);
+    timings.exif_ms = exif_start.elapsed().as_secs_f64() * 1000.0;
+
+    if let Some(thumb) = exif_result {
+        return Ok((thumb, true, timings));
     }
 
     // Tier 1: Full decode + downscale
+    let full_start = std::time::Instant::now();
     let decoded = decode_thumbnail(path, max_size)?;
-    Ok((decoded, false))
+    timings.full_ms = full_start.elapsed().as_secs_f64() * 1000.0;
+
+    Ok((decoded, false, timings))
 }
 
 // ---------------------------------------------------------------------------
@@ -231,10 +247,11 @@ mod tests {
         let path = dir.join("test.png");
         img.save_with_format(&path, ImageFormat::Png).unwrap();
 
-        let (thumb, is_exif) = decode_thumbnail_progressive(&path, 160).unwrap();
+        let (thumb, is_exif, timings) = decode_thumbnail_progressive(&path, 160).unwrap();
         assert!(!is_exif, "PNG should not have EXIF thumbnail");
         assert!(thumb.width <= 160);
         assert!(thumb.height <= 160);
+        assert!(timings.full_ms > 0.0, "full decode should have been timed");
 
         let _ = fs::remove_dir_all(&dir);
     }

@@ -8,4 +8,6 @@ mod folder_view;
 mod scheduler;
 
 pub use app::DecodedImage;
-pub use decode::{decode_thumbnail, decode_thumbnail_progressive, extract_exif_thumbnail};
+pub use decode::{
+    DecodeTimings, decode_thumbnail, decode_thumbnail_progressive, extract_exif_thumbnail,
+};
