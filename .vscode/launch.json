@@ -36,8 +36,8 @@
         {
             "id": "imagePath",
             "type": "promptString",
-            "description": "Path to an image file to open",
-            "default": "D:\\Photos\\test.jpg"
+            "description": "Path to an image file or folder to open",
+            "default": "D:\\src\\test_local"
         }
     ]
 }

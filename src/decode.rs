@@ -116,6 +116,33 @@ pub fn decode_full_thumbnail(
     ))
 }
 
+/// Decode a thumbnail from already-loaded file bytes (I/O already done).
+/// Applies EXIF orientation. Used by the I/O-separated worker pipeline.
+pub fn decode_from_bytes(
+    data: &[u8],
+    max_size: u32,
+) -> Result<(DecodedImage, DecodeTimings), String> {
+    let mut timings = DecodeTimings::default();
+    let start = std::time::Instant::now();
+
+    let orientation = read_exif_orientation(data);
+    let img = image::load_from_memory(data).map_err(|e| format!("Failed to decode: {e}"))?;
+    let img = apply_orientation(img, orientation);
+    let thumb = img.thumbnail(max_size, max_size);
+    let rgba = thumb.to_rgba8();
+
+    timings.full_ms = start.elapsed().as_secs_f64() * 1000.0;
+
+    Ok((
+        DecodedImage {
+            width: rgba.width(),
+            height: rgba.height(),
+            pixels: rgba.into_raw(),
+        },
+        timings,
+    ))
+}
+
 /// Try to extract the EXIF embedded thumbnail from file bytes.
 pub fn extract_exif_thumbnail(data: &[u8]) -> Option<DecodedImage> {
     let cursor = Cursor::new(data);
