@@ -594,17 +594,24 @@ impl FolderView {
                 if let Some(timings) = debug_timings {
                     let mut lines: Vec<(String, egui::Color32)> = Vec::new();
 
-                    // EXIF line — green if it was used, gray if attempted but failed
+                    // Label: "BMFF" for HEIC/HEIF container thumbnails, "EXIF" for everything else
+                    let thumb_label = if crate::decode::is_heif_extension(path) {
+                        "BMFF"
+                    } else {
+                        "EXIF"
+                    };
+
+                    // Thumbnail line — green if it was used, gray if attempted but failed
                     if timings.full_ms == 0.0 {
-                        // EXIF was used (no full decode needed)
+                        // Thumbnail was used (no full decode needed)
                         lines.push((
-                            format!("EXIF {:.1}ms", timings.exif_ms),
+                            format!("{thumb_label} {:.1}ms", timings.exif_ms),
                             egui::Color32::from_rgb(80, 220, 80),
                         ));
                     } else {
-                        // EXIF attempted but not found, show in gray
+                        // Thumbnail attempted but not found, show in gray
                         lines.push((
-                            format!("EXIF {:.1}ms", timings.exif_ms),
+                            format!("{thumb_label} {:.1}ms", timings.exif_ms),
                             egui::Color32::from_rgb(140, 140, 140),
                         ));
                         lines.push((

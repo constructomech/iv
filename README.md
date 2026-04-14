@@ -2,7 +2,7 @@
 
 A lean, GPU-accelerated image viewer built in Rust. Opens a folder and shows its images instantly using progressive rendering — EXIF thumbnails first, then higher quality as resources allow.
 
-Supports JPEG, PNG, WebP, TIFF, BMP, GIF, and RAW formats (DNG, CR2, NEF, ARW, etc.) with first-class performance on both local SSDs and network shares (SMB/NFS).
+Supports JPEG, PNG, WebP, TIFF, BMP, GIF, HEIC/HEIF, and RAW formats (DNG, CR2, NEF, ARW, etc.) with first-class performance on both local SSDs and network shares (SMB/NFS).
 
 ## Prerequisites
 
@@ -32,21 +32,33 @@ rustc --version   # e.g. rustc 1.94.1
 
 ### Platform Dependencies
 
-**Windows:** No additional dependencies. The MSVC build tools are installed with Visual Studio or the [VS Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/).
+**Windows:** MSVC build tools (installed with Visual Studio or the [VS Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/)), plus [CMake](https://cmake.org/download/) and [Git](https://git-scm.com/) on your PATH (needed by vcpkg for HEIC support).
 
-**macOS:** Xcode command line tools:
-```bash
-xcode-select --install
+Install `cargo-vcpkg` to manage the native libheif dependency:
+```powershell
+cargo install cargo-vcpkg
 ```
 
-**Linux (Debian/Ubuntu):** GPU and windowing libraries:
+**macOS:** Xcode command line tools and libheif:
+```bash
+xcode-select --install
+brew install libheif
+```
+
+**Linux (Debian/Ubuntu):** GPU, windowing, and libheif libraries:
 ```bash
 sudo apt install -y libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
-    libxkbcommon-dev libssl-dev libgtk-3-dev
+    libxkbcommon-dev libssl-dev libgtk-3-dev libheif-dev
 ```
 
 ## Building
 
+**Windows** — first build the vcpkg dependencies (one-time, takes a few minutes):
+```powershell
+cargo vcpkg build
+```
+
+Then build normally on all platforms:
 ```bash
 # Debug build (fast compile, slow runtime)
 cargo build
@@ -78,6 +90,20 @@ cargo test --test image_loading
 
 Tests generate synthetic images at runtime — no test fixtures need to be checked in.
 Temp files are cleaned up automatically.
+
+## Benchmarking
+
+```bash
+# Run the decode benchmark (generates test images on first run)
+cargo run --release --example bench
+
+# Custom thumbnail size and image directory
+cargo run --release --example bench -- --thumb-size 256 --dir path/to/bench_images
+```
+
+Benchmarks all supported formats (JPEG, PNG, WebP, TIFF, BMP, GIF, HEIC) at 12MP,
+measuring both EXIF thumbnail extraction and full decode+downscale times.
+Delete the benchmark directory to regenerate test images.
 
 ## Running
 
@@ -155,4 +181,5 @@ IV_DEBUG=1 iv path/to/photos/
 
 The overlay shows:
 - **EXIF X.Xms** — Time to extract and decode the embedded EXIF thumbnail (green = used)
-- **Full X.Xms** — Time for full decode + downscale (shown when EXIF was not available)
+- **BMFF X.Xms** — Time to extract libheif container thumbnail for HEIC/HEIF files (green = used)
+- **Full X.Xms** — Time for full decode + downscale (shown when thumbnail was not available)

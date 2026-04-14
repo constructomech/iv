@@ -52,10 +52,18 @@ pub fn apply_orientation(img: image::DynamicImage, orientation: u32) -> image::D
 
 /// Tier 0: Try EXIF thumbnail extraction only.
 /// Reads at most 256KB from disk — very fast, especially on network shares.
-/// Returns Some(image) if an embedded JPEG thumbnail was found.
+/// For HEIC/HEIF files, tries the container-level thumbnail via libheif instead.
+/// Returns Some(image) if an embedded thumbnail was found.
 pub fn try_exif_only(path: &Path) -> (Option<DecodedImage>, DecodeTimings) {
     let mut timings = DecodeTimings::default();
     let start = std::time::Instant::now();
+
+    // HEIC/HEIF: thumbnails are stored in the container, not in EXIF tags
+    if is_heif_extension(path) {
+        let result = try_heif_thumbnail(path);
+        timings.exif_ms = start.elapsed().as_secs_f64() * 1000.0;
+        return (result, timings);
+    }
 
     let result = (|| -> Option<DecodedImage> {
         let mut file = std::fs::File::open(path).ok()?;
@@ -141,6 +149,68 @@ pub fn decode_from_bytes(
         },
         timings,
     ))
+}
+
+/// Check whether a file path has an HEIF/HEIC extension.
+pub fn is_heif_extension(path: &Path) -> bool {
+    match path.extension().and_then(|e| e.to_str()) {
+        Some(ext) => matches!(ext.to_ascii_lowercase().as_str(), "heic" | "heif" | "hif"),
+        None => false,
+    }
+}
+
+/// Try to extract the HEIF/HEIC container-level thumbnail via libheif.
+/// HEIC stores thumbnails as separate image items (not in EXIF), so the
+/// standard EXIF `JPEGInterchangeFormat` approach doesn't work.
+pub fn try_heif_thumbnail(path: &Path) -> Option<DecodedImage> {
+    use libheif_rs::{ColorSpace, LibHeif, RgbChroma};
+
+    let path_str = path.to_str()?;
+    let ctx = libheif_rs::HeifContext::read_from_file(path_str).ok()?;
+    let handle = ctx.primary_image_handle().ok()?;
+
+    if handle.number_of_thumbnails() == 0 {
+        return None;
+    }
+
+    let mut thumb_ids = vec![0u32; 1];
+    handle.thumbnail_ids(&mut thumb_ids);
+    let thumb_handle = handle.thumbnail(thumb_ids[0]).ok()?;
+
+    let lib_heif = LibHeif::new();
+    let image = lib_heif
+        .decode(
+            &thumb_handle,
+            ColorSpace::Rgb(RgbChroma::Rgba),
+            None,
+        )
+        .ok()?;
+
+    let planes = image.planes();
+    let plane = planes.interleaved?;
+    let width = image.width();
+    let height = image.height();
+    let stride = plane.stride;
+    let data = plane.data;
+
+    // Handle stride != width*4 (row padding)
+    let row_bytes = width as usize * 4;
+    let pixels = if stride == row_bytes {
+        data[..row_bytes * height as usize].to_vec()
+    } else {
+        let mut pixels = Vec::with_capacity(row_bytes * height as usize);
+        for y in 0..height as usize {
+            let row_start = y * stride;
+            pixels.extend_from_slice(&data[row_start..row_start + row_bytes]);
+        }
+        pixels
+    };
+
+    Some(DecodedImage {
+        width,
+        height,
+        pixels,
+    })
 }
 
 /// Try to extract the EXIF embedded thumbnail from file bytes.

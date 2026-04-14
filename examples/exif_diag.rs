@@ -8,6 +8,9 @@ fn main() {
         std::process::exit(1);
     }
 
+    // Register HEIF/HEIC decoder hooks so full decode works on HEIC files
+    iv::register_heif_hooks();
+
     for path_str in &args {
         let path = std::path::Path::new(path_str);
         println!("\n=== {} ===", path.display());
@@ -41,7 +44,7 @@ fn main() {
             Err(e) => println!("  Can't open: {e}"),
         }
 
-        // Step 2: Try our extraction
+        // Step 2: Try our EXIF extraction
         let file_data = std::fs::read(path).expect("failed to read file");
         let start = std::time::Instant::now();
         match iv::extract_exif_thumbnail(&file_data) {
@@ -53,6 +56,21 @@ fn main() {
             ),
             None => println!(
                 "  EXIF thumb: None ({:.1}ms)",
+                start.elapsed().as_secs_f64() * 1000.0
+            ),
+        }
+
+        // Step 2b: Try HEIF container thumbnail (for HEIC/HEIF files)
+        let start = std::time::Instant::now();
+        match iv::try_heif_thumbnail(path) {
+            Some(img) => println!(
+                "  HEIF thumb: {}x{} ({:.1}ms)",
+                img.width,
+                img.height,
+                start.elapsed().as_secs_f64() * 1000.0
+            ),
+            None => println!(
+                "  HEIF thumb: None ({:.1}ms)",
                 start.elapsed().as_secs_f64() * 1000.0
             ),
         }

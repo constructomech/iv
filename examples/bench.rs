@@ -10,6 +10,7 @@
 /// The benchmark generates test images on first run and reuses them on subsequent runs.
 /// Delete the benchmark directory to regenerate.
 use image::{ImageFormat, RgbImage, RgbaImage};
+use libheif_rs::{ColorSpace, CompressionFormat, EncoderQuality, HeifContext, Image, LibHeif, RgbChroma, Channel};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -22,6 +23,9 @@ const DEFAULT_HEIGHT: u32 = 3000;
 const ITERATIONS: usize = 5;
 
 fn main() {
+    // Register HEIF/HEIC decoder hooks so the `image` crate can decode these formats.
+    libheif_rs::integration::image::register_all_decoding_hooks();
+
     let args: Vec<String> = std::env::args().collect();
 
     let thumb_size: u32 = args
@@ -64,10 +68,10 @@ fn main() {
 
     // Run benchmarks
     println!(
-        "{:<35} {:>10} {:>10} {:>10} {:>10}",
-        "File", "EXIF (ms)", "Full (ms)", "Size (KB)", "Pixels"
+        "{:<35} {:>12} {:>10} {:>10} {:>10}",
+        "File", "Thumb (ms)", "Full (ms)", "Size (KB)", "Pixels"
     );
-    println!("{}", "-".repeat(80));
+    println!("{}", "-".repeat(82));
 
     for file in &test_files {
         let file_size_kb = std::fs::metadata(file).map(|m| m.len() / 1024).unwrap_or(0);
@@ -78,26 +82,42 @@ fn main() {
             .to_string_lossy()
             .to_string();
 
-        // Benchmark EXIF extraction
-        let exif_ms = bench_exif(file);
+        // Benchmark thumbnail extraction — BMFF path for HEIC, EXIF path for others
+        let is_heif = iv::is_heif_extension(file);
+        let (thumb_ms, thumb_found, thumb_label) = if is_heif {
+            let (ms, found) = bench_heif_thumb(file);
+            (ms, found, "BMFF")
+        } else {
+            let (ms, found) = bench_exif(file);
+            (ms, found, "EXIF")
+        };
 
         // Benchmark full thumbnail decode
         let (full_ms, pixels) = bench_full_decode(file, thumb_size);
 
+        // Color the thumb time: green if found, yellow if miss
+        let thumb_time_str = format!("{:.2}", thumb_ms);
+        let colored_thumb = if thumb_found {
+            format!("\x1b[32m{:>6}\x1b[0m", thumb_time_str) // green
+        } else {
+            format!("\x1b[33m{:>6}\x1b[0m", thumb_time_str) // yellow
+        };
+
         println!(
-            "{:<35} {:>10.2} {:>10.2} {:>10} {:>10}",
+            "{:<35} {:>4} {} {:>10.2} {:>10} {:>10}",
             truncate(&file_name, 35),
-            exif_ms,
+            thumb_label,
+            colored_thumb,
             full_ms,
             file_size_kb,
             pixels
         );
     }
 
-    println!("\n{}", "-".repeat(80));
+    println!("\n{}", "-".repeat(82));
     println!("Note: EXIF = file read (256KB max) + EXIF parse + thumbnail decode + orientation.");
+    println!("      BMFF = libheif container thumbnail decode (HEIC/HEIF files).");
     println!("      Full = file read (entire) + full decode + downscale + orientation.");
-    println!("      EXIF time for non-JPEG formats is just the failed parse attempt.");
 }
 
 fn dir_is_empty(path: &Path) -> bool {
@@ -167,11 +187,17 @@ fn generate_test_images(dir: &Path) {
         .unwrap();
     println!(" done");
 
-    // 5. TIFF
-    print!("  TIFF...");
+    // 5. TIFF without EXIF thumbnail
+    print!("  TIFF (no EXIF)...");
     std::io::stdout().flush().unwrap();
-    src.save_with_format(dir.join("tiff_test.tiff"), ImageFormat::Tiff)
+    src.save_with_format(dir.join("tiff_no_exif.tiff"), ImageFormat::Tiff)
         .unwrap();
+    println!(" done");
+
+    // 5b. TIFF with EXIF thumbnail
+    print!("  TIFF (with EXIF)...");
+    std::io::stdout().flush().unwrap();
+    create_tiff_with_exif_thumbnail(dir, &src);
     println!(" done");
 
     // 6. BMP
@@ -188,6 +214,18 @@ fn generate_test_images(dir: &Path) {
     gif_src
         .save_with_format(dir.join("gif_test.gif"), ImageFormat::Gif)
         .unwrap();
+    println!(" done");
+
+    // 8. HEIC without BMFF thumbnail
+    print!("  HEIC (no BMFF)...");
+    std::io::stdout().flush().unwrap();
+    create_heic_image(dir, &src, "heic_no_bmff.heic", false);
+    println!(" done");
+
+    // 9. HEIC with BMFF thumbnail
+    print!("  HEIC (with BMFF)...");
+    std::io::stdout().flush().unwrap();
+    create_heic_image(dir, &src, "heic_with_bmff.heic", true);
     println!(" done");
 }
 
@@ -299,6 +337,214 @@ fn build_exif_app1_with_thumbnail(thumb_jpeg: &[u8]) -> Vec<u8> {
     app1
 }
 
+/// Create a TIFF with an embedded EXIF thumbnail in IFD1.
+/// Places the thumbnail near the start of the file (after the IFD chain, before
+/// pixel data) so it's accessible within the 256KB EXIF-only read window.
+fn create_tiff_with_exif_thumbnail(dir: &Path, src: &RgbImage) {
+    // Create a JPEG thumbnail
+    let thumb = image::imageops::thumbnail(src, 160, 120);
+    let mut thumb_jpeg = Vec::new();
+    let mut thumb_encoder =
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut thumb_jpeg, 75);
+    thumb_encoder
+        .encode(
+            thumb.as_raw(),
+            thumb.width(),
+            thumb.height(),
+            image::ExtendedColorType::Rgb8,
+        )
+        .unwrap();
+
+    // Build a minimal TIFF from scratch:
+    // TIFF header -> IFD0 (image tags) -> IFD1 (thumbnail tags) -> thumbnail JPEG -> strip data
+    let width = src.width();
+    let height = src.height();
+    let row_bytes = (width * 3) as usize;
+    let strip_size = row_bytes * height as usize;
+
+    let mut tiff = Vec::new();
+
+    // TIFF header (little-endian)
+    tiff.extend_from_slice(b"II");
+    tiff.extend_from_slice(&42u16.to_le_bytes());
+    tiff.extend_from_slice(&8u32.to_le_bytes()); // offset to IFD0
+
+    // IFD0: 9 tags for a minimal valid TIFF image
+    let ifd0_tag_count: u16 = 9;
+    tiff.extend_from_slice(&ifd0_tag_count.to_le_bytes());
+
+    // Calculate IFD sizes for offset planning
+    let ifd0_end = 8 + 2 + (ifd0_tag_count as usize) * 12 + 4;
+    let ifd1_tag_count: u16 = 2;
+    // IFD1: 2 + 2*12 + 4 = 30 bytes
+    let ifd1_end = ifd0_end + 2 + (ifd1_tag_count as usize) * 12 + 4;
+    let thumb_data_offset = ifd1_end as u32;
+    let strip_data_offset = thumb_data_offset + thumb_jpeg.len() as u32;
+
+    // IFD0 tags (must be in ascending tag order)
+    // ImageWidth (0x0100)
+    tiff.extend_from_slice(&0x0100u16.to_le_bytes());
+    tiff.extend_from_slice(&4u16.to_le_bytes()); // LONG
+    tiff.extend_from_slice(&1u32.to_le_bytes());
+    tiff.extend_from_slice(&width.to_le_bytes());
+
+    // ImageLength (0x0101)
+    tiff.extend_from_slice(&0x0101u16.to_le_bytes());
+    tiff.extend_from_slice(&4u16.to_le_bytes());
+    tiff.extend_from_slice(&1u32.to_le_bytes());
+    tiff.extend_from_slice(&height.to_le_bytes());
+
+    // BitsPerSample (0x0102) = [8, 8, 8]
+    let bps_offset = strip_data_offset + strip_size as u32;
+    tiff.extend_from_slice(&0x0102u16.to_le_bytes());
+    tiff.extend_from_slice(&3u16.to_le_bytes()); // SHORT
+    tiff.extend_from_slice(&3u32.to_le_bytes()); // count=3
+    tiff.extend_from_slice(&bps_offset.to_le_bytes()); // offset (>4 bytes of data)
+
+    // Compression (0x0103) = 1 (no compression)
+    tiff.extend_from_slice(&0x0103u16.to_le_bytes());
+    tiff.extend_from_slice(&3u16.to_le_bytes()); // SHORT
+    tiff.extend_from_slice(&1u32.to_le_bytes());
+    tiff.extend_from_slice(&1u16.to_le_bytes());
+    tiff.extend_from_slice(&0u16.to_le_bytes()); // padding
+
+    // PhotometricInterpretation (0x0106) = 2 (RGB)
+    tiff.extend_from_slice(&0x0106u16.to_le_bytes());
+    tiff.extend_from_slice(&3u16.to_le_bytes()); // SHORT
+    tiff.extend_from_slice(&1u32.to_le_bytes());
+    tiff.extend_from_slice(&2u16.to_le_bytes());
+    tiff.extend_from_slice(&0u16.to_le_bytes());
+
+    // StripOffsets (0x0111) = single strip at strip_data_offset
+    tiff.extend_from_slice(&0x0111u16.to_le_bytes());
+    tiff.extend_from_slice(&4u16.to_le_bytes()); // LONG
+    tiff.extend_from_slice(&1u32.to_le_bytes());
+    tiff.extend_from_slice(&strip_data_offset.to_le_bytes());
+
+    // SamplesPerPixel (0x0115) = 3
+    tiff.extend_from_slice(&0x0115u16.to_le_bytes());
+    tiff.extend_from_slice(&3u16.to_le_bytes()); // SHORT
+    tiff.extend_from_slice(&1u32.to_le_bytes());
+    tiff.extend_from_slice(&3u16.to_le_bytes());
+    tiff.extend_from_slice(&0u16.to_le_bytes());
+
+    // RowsPerStrip (0x0116) = height (single strip)
+    tiff.extend_from_slice(&0x0116u16.to_le_bytes());
+    tiff.extend_from_slice(&4u16.to_le_bytes()); // LONG
+    tiff.extend_from_slice(&1u32.to_le_bytes());
+    tiff.extend_from_slice(&height.to_le_bytes());
+
+    // StripByteCounts (0x0117) = total bytes in the strip
+    tiff.extend_from_slice(&0x0117u16.to_le_bytes());
+    tiff.extend_from_slice(&4u16.to_le_bytes()); // LONG
+    tiff.extend_from_slice(&1u32.to_le_bytes());
+    tiff.extend_from_slice(&(strip_size as u32).to_le_bytes());
+
+    // Next IFD offset -> IFD1
+    tiff.extend_from_slice(&(ifd0_end as u32).to_le_bytes());
+
+    assert_eq!(tiff.len(), ifd0_end, "IFD0 size mismatch");
+
+    // IFD1: thumbnail tags
+    tiff.extend_from_slice(&ifd1_tag_count.to_le_bytes());
+
+    // JPEGInterchangeFormat (0x0201)
+    tiff.extend_from_slice(&0x0201u16.to_le_bytes());
+    tiff.extend_from_slice(&4u16.to_le_bytes());
+    tiff.extend_from_slice(&1u32.to_le_bytes());
+    tiff.extend_from_slice(&thumb_data_offset.to_le_bytes());
+
+    // JPEGInterchangeFormatLength (0x0202)
+    tiff.extend_from_slice(&0x0202u16.to_le_bytes());
+    tiff.extend_from_slice(&4u16.to_le_bytes());
+    tiff.extend_from_slice(&1u32.to_le_bytes());
+    tiff.extend_from_slice(&(thumb_jpeg.len() as u32).to_le_bytes());
+
+    // No next IFD
+    tiff.extend_from_slice(&0u32.to_le_bytes());
+
+    assert_eq!(tiff.len(), ifd1_end, "IFD1 size mismatch");
+
+    // Thumbnail JPEG
+    tiff.extend_from_slice(&thumb_jpeg);
+
+    // Strip pixel data (raw RGB, uncompressed)
+    for y in 0..height {
+        for x in 0..width {
+            let p = src.get_pixel(x, y);
+            tiff.extend_from_slice(&[p[0], p[1], p[2]]);
+        }
+    }
+
+    // BitsPerSample data (3 SHORTs: 8, 8, 8)
+    tiff.extend_from_slice(&8u16.to_le_bytes());
+    tiff.extend_from_slice(&8u16.to_le_bytes());
+    tiff.extend_from_slice(&8u16.to_le_bytes());
+
+    std::fs::write(dir.join("tiff_with_exif.tiff"), &tiff).unwrap();
+}
+
+/// Helper: create a libheif Image from an RgbImage.
+fn rgb_to_heif_image(src: &RgbImage) -> Image {
+    let width = src.width();
+    let height = src.height();
+
+    let mut image = Image::new(width, height, ColorSpace::Rgb(RgbChroma::C444)).unwrap();
+    image.create_plane(Channel::R, width, height, 8).unwrap();
+    image.create_plane(Channel::G, width, height, 8).unwrap();
+    image.create_plane(Channel::B, width, height, 8).unwrap();
+
+    let planes = image.planes_mut();
+    let plane_r = planes.r.unwrap();
+    let stride = plane_r.stride;
+    let data_r = plane_r.data;
+    let data_g = planes.g.unwrap().data;
+    let data_b = planes.b.unwrap().data;
+
+    for y in 0..height {
+        for x in 0..width {
+            let pixel = src.get_pixel(x, y);
+            let idx = stride * y as usize + x as usize;
+            data_r[idx] = pixel[0];
+            data_g[idx] = pixel[1];
+            data_b[idx] = pixel[2];
+        }
+    }
+
+    image
+}
+
+/// Create an HEIC image using libheif-rs, optionally with a BMFF thumbnail.
+fn create_heic_image(dir: &Path, src: &RgbImage, filename: &str, with_thumbnail: bool) {
+    let lib_heif = LibHeif::new();
+
+    let image = rgb_to_heif_image(src);
+
+    let mut context = HeifContext::new().unwrap();
+    let mut encoder = lib_heif.encoder_for_format(CompressionFormat::Av1).unwrap();
+    encoder.set_quality(EncoderQuality::Lossy(50)).unwrap();
+    let master_handle = context.encode_image(&image, &mut encoder, None).unwrap();
+
+    if with_thumbnail {
+        // Pass the full-size image and let libheif downscale to bbox_size.
+        // encode_thumbnail skips if the input already fits the bounding box.
+        let mut thumb_encoder = lib_heif.encoder_for_format(CompressionFormat::Av1).unwrap();
+        thumb_encoder
+            .set_quality(EncoderQuality::Lossy(40))
+            .unwrap();
+        let thumb_result = context
+            .encode_thumbnail(&image, &master_handle, 320, &mut thumb_encoder, None)
+            .unwrap();
+        if thumb_result.is_none() {
+            eprintln!("    Warning: encode_thumbnail returned None for {filename}");
+        }
+    }
+
+    context
+        .write_to_file(dir.join(filename).to_str().unwrap())
+        .unwrap();
+}
+
 fn collect_test_files(dir: &Path) -> Vec<PathBuf> {
     let mut files: Vec<PathBuf> = std::fs::read_dir(dir)
         .unwrap()
@@ -310,9 +556,11 @@ fn collect_test_files(dir: &Path) -> Vec<PathBuf> {
     files
 }
 
-fn bench_exif(path: &Path) -> f64 {
+/// Returns (median_ms, thumbnail_found).
+fn bench_exif(path: &Path) -> (f64, bool) {
     // Warm up
-    let _ = iv::extract_exif_thumbnail(&std::fs::read(path).unwrap_or_default());
+    let warmup = iv::extract_exif_thumbnail(&std::fs::read(path).unwrap_or_default());
+    let found = warmup.is_some();
 
     let mut times = Vec::with_capacity(ITERATIONS);
     for _ in 0..ITERATIONS {
@@ -322,7 +570,22 @@ fn bench_exif(path: &Path) -> f64 {
         let _ = iv::extract_exif_thumbnail(&data);
         times.push(start.elapsed().as_secs_f64() * 1000.0);
     }
-    median(&mut times)
+    (median(&mut times), found)
+}
+
+/// Returns (median_ms, thumbnail_found).
+fn bench_heif_thumb(path: &Path) -> (f64, bool) {
+    // Warm up
+    let warmup = iv::try_heif_thumbnail(path);
+    let found = warmup.is_some();
+
+    let mut times = Vec::with_capacity(ITERATIONS);
+    for _ in 0..ITERATIONS {
+        let start = Instant::now();
+        let _ = iv::try_heif_thumbnail(path);
+        times.push(start.elapsed().as_secs_f64() * 1000.0);
+    }
+    (median(&mut times), found)
 }
 
 fn bench_full_decode(path: &Path, thumb_size: u32) -> (f64, String) {
