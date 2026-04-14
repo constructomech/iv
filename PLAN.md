@@ -146,7 +146,23 @@
 - Pre-decode adjacent images (left/right neighbors) for instant navigation
 - **Exit criterion:** Click-to-visible in <50ms (showing EXIF thumb), full quality in <300ms for a 24MP JPEG on SSD.
 
-### Phase 6 — Scroll Virtualization + Large Folder Performance  
+### Phase 6 — Decode Benchmark Suite
+**Goal:** Establish a repeatable benchmark for measuring and comparing decode techniques.
+
+- `examples/bench.rs` — generates high-res (4000×3000 = 12MP) test images in all supported formats
+- Test variants:
+  - JPEG without EXIF thumbnail
+  - JPEG with embedded EXIF thumbnail (manually constructed APP1)
+  - PNG, WebP, TIFF, BMP, GIF
+- Measures per-format:
+  - EXIF extraction time (file read + EXIF parse + thumbnail decode)
+  - Full decode + downscale time (file read + decode + orientation + resize)
+  - Output thumbnail dimensions
+- Configurable thumbnail resolution (`--thumb-size`)
+- Reusable image directory (regenerate by deleting)
+- **Exit criterion:** `cargo run --release --example bench` produces a comparison table.
+
+### Phase 7 — Scroll Virtualization + Large Folder Performance  
 **Goal:** Handle 100k+ image folders without lag.
 
 - Only allocate egui widgets for visible rows + buffer rows
@@ -156,7 +172,7 @@
 - Profile and fix any O(n) per-frame operations
 - **Exit criterion:** Folder with 100,000 images scrolls at 60fps. Memory usage stays under 4GB.
 
-### Phase 7 — Measurement & Thumbnail Cache Decision
+### Phase 8 — Measurement & Thumbnail Cache Decision
 **Goal:** Decide whether to add a persistent thumbnail cache.
 
 - Instrument all stages with timing:
@@ -172,7 +188,7 @@
   - Async background writer, never blocks the UI
 - **Exit criterion:** Published benchmark numbers. Cache decision made with data.
 
-### Phase 8 — Polish & Robustness
+### Phase 9 — Polish & Robustness
 **Goal:** Handle real-world usage edge cases.
 
 - Adjustable thumbnail/tile size (keyboard shortcut or scroll-zoom in folder view)
