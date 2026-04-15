@@ -96,7 +96,8 @@ pub struct VisibleRows {
 pub struct Grid {
     config: GridConfig,
     viewport: Viewport,
-    tiles: Vec<TileState>,
+    states: Vec<TileState>,
+    names: Vec<String>,
 }
 
 impl Grid {
@@ -105,32 +106,39 @@ impl Grid {
         Self {
             config,
             viewport: Viewport::default(),
-            tiles: Vec::new(),
+            states: Vec::new(),
+            names: Vec::new(),
         }
     }
 
     // -- Tile management ---------------------------------------------------
 
-    /// Add a tile to the grid. Returns its index.
-    pub fn add_tile(&mut self) -> usize {
-        let idx = self.tiles.len();
-        self.tiles.push(TileState::NotLoaded);
+    /// Add a named tile to the grid. Returns its index.
+    pub fn add_tile(&mut self, name: impl Into<String>) -> usize {
+        let idx = self.states.len();
+        self.states.push(TileState::NotLoaded);
+        self.names.push(name.into());
         idx
     }
 
     /// Number of tiles in the grid.
     pub fn tile_count(&self) -> usize {
-        self.tiles.len()
+        self.states.len()
     }
 
     /// Get the state of a tile.
     pub fn tile_state(&self, idx: usize) -> TileState {
-        self.tiles[idx]
+        self.states[idx]
     }
 
     /// Set the state of a tile.
     pub fn set_tile_state(&mut self, idx: usize, state: TileState) {
-        self.tiles[idx] = state;
+        self.states[idx] = state;
+    }
+
+    /// Get the name of a tile.
+    pub fn tile_name(&self, idx: usize) -> &str {
+        &self.names[idx]
     }
 
     // -- Layout ------------------------------------------------------------
@@ -152,7 +160,7 @@ impl Grid {
         if cols == 0 {
             return 0;
         }
-        self.tiles.len().div_ceil(cols)
+        self.states.len().div_ceil(cols)
     }
 
     /// Total content height in pixels.
@@ -173,7 +181,7 @@ impl Grid {
             return None;
         }
         let idx = row * cols + col;
-        if idx < self.tiles.len() {
+        if idx < self.states.len() {
             Some(idx)
         } else {
             None
@@ -202,7 +210,7 @@ impl Grid {
     /// Compute which rows are currently visible (including partially visible).
     pub fn visible_rows(&self) -> VisibleRows {
         let ch = self.config.cell_height();
-        if ch <= 0.0 || self.tiles.is_empty() {
+        if ch <= 0.0 || self.states.is_empty() {
             return VisibleRows { first: 0, last: 0 };
         }
         let total = self.total_rows();
@@ -218,7 +226,7 @@ impl Grid {
         let vr = self.visible_rows();
         let cols = self.cols();
         let start = vr.first * cols;
-        let end = (vr.last * cols).min(self.tiles.len());
+        let end = (vr.last * cols).min(self.states.len());
         (start, end)
     }
 
@@ -226,6 +234,12 @@ impl Grid {
     pub fn visible_tiles(&self) -> impl Iterator<Item = usize> {
         let (start, end) = self.visible_tile_range();
         start..end
+    }
+
+    /// Iterate over visible tiles, yielding (index, name, state) for each.
+    pub fn visible_tile_info(&self) -> impl Iterator<Item = (usize, &str, TileState)> {
+        let (start, end) = self.visible_tile_range();
+        (start..end).map(move |idx| (idx, self.names[idx].as_str(), self.states[idx]))
     }
 
     // -- Config access -----------------------------------------------------
@@ -250,8 +264,8 @@ mod tests {
     fn make_grid(tile_count: usize) -> Grid {
         let mut g = Grid::new(GridConfig::default());
         g.set_viewport_size(1200.0, 800.0);
-        for _ in 0..tile_count {
-            g.add_tile();
+        for i in 0..tile_count {
+            g.add_tile(format!("img_{i:05}.jpg"));
         }
         g
     }
@@ -445,7 +459,7 @@ mod tests {
 
         // Simulate enumeration adding tiles one at a time
         for i in 0..50 {
-            let idx = g.add_tile();
+            let idx = g.add_tile(format!("img_{i:05}.jpg"));
             assert_eq!(idx, i);
         }
 
@@ -454,20 +468,33 @@ mod tests {
     }
 
     #[test]
+    fn tile_names_stored() {
+        let mut g = Grid::new(GridConfig::default());
+        g.set_viewport_size(1200.0, 800.0);
+        g.add_tile("photo_001.heic");
+        g.add_tile("sunset.jpg");
+        g.add_tile("screenshot.png");
+
+        assert_eq!(g.tile_name(0), "photo_001.heic");
+        assert_eq!(g.tile_name(1), "sunset.jpg");
+        assert_eq!(g.tile_name(2), "screenshot.png");
+    }
+
+    #[test]
     fn scroll_adjusts_as_grid_grows() {
         let mut g = Grid::new(GridConfig::default());
         g.set_viewport_size(1200.0, 800.0);
 
         // Start with small grid — content fits in viewport
-        for _ in 0..7 {
-            g.add_tile();
+        for i in 0..7 {
+            g.add_tile(format!("img_{i}.jpg"));
         }
         g.set_scroll(500.0);
         assert_eq!(g.scroll_y(), 0.0); // clamped — content fits
 
         // Grid grows beyond viewport
-        for _ in 0..200 {
-            g.add_tile();
+        for i in 7..207 {
+            g.add_tile(format!("img_{i}.jpg"));
         }
         g.set_scroll(500.0);
         assert!(g.scroll_y() > 0.0); // now there's room to scroll
@@ -526,8 +553,8 @@ mod tests {
         // Simulate enumeration + scrolling interleaved
         for batch in 0..20 {
             // Add a batch of tiles
-            for _ in 0..50 {
-                g.add_tile();
+            for j in 0..50 {
+                g.add_tile(format!("batch{batch}_img{j:03}.jpg"));
             }
 
             // Scroll to ~middle of current content
@@ -549,6 +576,270 @@ mod tests {
                     g.tile_count()
                 );
             }
+        }
+    }
+
+    // -- Visible tile info tests -------------------------------------------
+
+    #[test]
+    fn visible_tile_info_yields_names_and_states() {
+        let mut g = Grid::new(GridConfig::default());
+        g.set_viewport_size(1200.0, 800.0);
+        g.add_tile("a.jpg");
+        g.add_tile("b.png");
+        g.add_tile("c.heic");
+
+        g.set_tile_state(1, TileState::Loaded);
+
+        let info: Vec<_> = g.visible_tile_info().collect();
+        assert_eq!(info.len(), 3);
+        assert_eq!(info[0], (0, "a.jpg", TileState::NotLoaded));
+        assert_eq!(info[1], (1, "b.png", TileState::Loaded));
+        assert_eq!(info[2], (2, "c.heic", TileState::NotLoaded));
+    }
+
+    #[test]
+    fn visible_tile_info_only_visible() {
+        let mut g = make_grid(100); // 15 rows, viewport shows 5
+        g.set_scroll(336.0); // rows 2..7 visible
+
+        let info: Vec<_> = g.visible_tile_info().collect();
+        // rows 2..7 = 5 rows × 7 cols = 35 tiles
+        assert_eq!(info.len(), 35);
+        // First visible tile should be row 2, col 0 = idx 14
+        assert_eq!(info[0].0, 14);
+        assert_eq!(info[0].1, "img_00014.jpg");
+    }
+
+    // -- Enumeration timing under growth + scroll --------------------------
+
+    #[test]
+    fn enumeration_while_scrolling_stays_fast() {
+        use std::time::Instant;
+
+        let mut g = Grid::new(GridConfig::default());
+        g.set_viewport_size(1200.0, 800.0);
+
+        let mut add_times_us = Vec::new();
+        let mut enum_times_us = Vec::new();
+        let mut total_tiles = 0usize;
+
+        // Simulate: add 100 tiles per batch, 100 batches = 10,000 tiles.
+        // Between each batch, scroll to a random-ish position and
+        // enumerate all visible tiles.
+        for batch in 0..100 {
+            // Add tiles
+            let t0 = Instant::now();
+            for j in 0..100 {
+                g.add_tile(format!("img_{:06}.heic", total_tiles + j));
+            }
+            total_tiles += 100;
+            add_times_us.push(t0.elapsed().as_micros());
+
+            // Scroll to various positions
+            let scroll = match batch % 4 {
+                0 => 0.0,                       // top
+                1 => g.content_height() / 2.0,  // middle
+                2 => g.content_height(),        // bottom (clamped)
+                _ => g.content_height() * 0.75, // 3/4
+            };
+            g.set_scroll(scroll);
+
+            // Enumerate visible tiles (the hot path)
+            let t1 = Instant::now();
+            let mut count = 0;
+            for (idx, name, state) in g.visible_tile_info() {
+                assert!(idx < total_tiles);
+                assert!(!name.is_empty());
+                assert_eq!(state, TileState::NotLoaded);
+                count += 1;
+            }
+            enum_times_us.push(t1.elapsed().as_micros());
+
+            assert!(count > 0, "should have visible tiles at batch {batch}");
+            assert!(count <= 50, "shouldn't enumerate more than ~50 tiles");
+        }
+
+        // Stats
+        let add_avg = add_times_us.iter().sum::<u128>() as f64 / add_times_us.len() as f64;
+        let enum_avg = enum_times_us.iter().sum::<u128>() as f64 / enum_times_us.len() as f64;
+        let enum_max = *enum_times_us.iter().max().unwrap();
+
+        println!("\n=== Growth + Scroll + Enumerate Timing ===");
+        println!("  Total tiles:     {total_tiles}");
+        println!("  Add 100 tiles:   {add_avg:.0}µs avg");
+        println!("  Enumerate vis:   {enum_avg:.0}µs avg, {enum_max}µs max");
+        println!("==========================================\n");
+
+        // Assertions: enumeration should be <100µs even at 10k tiles
+        assert!(
+            enum_max < 100,
+            "visible enumeration took {enum_max}µs, expected <100µs"
+        );
+    }
+
+    #[test]
+    fn rapid_scroll_during_growth_enumeration() {
+        use std::time::Instant;
+
+        let mut g = Grid::new(GridConfig::default());
+        g.set_viewport_size(1200.0, 800.0);
+
+        // Add 1000 tiles upfront
+        for i in 0..1000 {
+            g.add_tile(format!("img_{i:05}.jpg"));
+        }
+
+        // Simulate rapid scrolling: 200 scroll jumps, enumerate each time
+        let mut enum_times = Vec::new();
+        let content = g.content_height();
+        for step in 0..200 {
+            // Zigzag scroll pattern
+            let scroll = if step % 2 == 0 {
+                content * (step as f32 / 200.0)
+            } else {
+                content * (1.0 - step as f32 / 200.0)
+            };
+            g.set_scroll(scroll);
+
+            // Add a few more tiles mid-scroll (simulates ongoing enumeration)
+            for j in 0..5 {
+                g.add_tile(format!("late_{step}_{j}.jpg"));
+            }
+
+            let t = Instant::now();
+            let tiles: Vec<_> = g.visible_tile_info().collect();
+            enum_times.push(t.elapsed().as_micros());
+
+            assert!(!tiles.is_empty());
+            for &(idx, _, _) in &tiles {
+                assert!(idx < g.tile_count());
+            }
+        }
+
+        let max_us = *enum_times.iter().max().unwrap();
+        let avg_us = enum_times.iter().sum::<u128>() as f64 / enum_times.len() as f64;
+
+        println!("\n=== Rapid Scroll + Growth Enumeration ===");
+        println!("  Final tiles:     {}", g.tile_count());
+        println!("  Enumerate vis:   {avg_us:.0}µs avg, {max_us}µs max");
+        println!("=========================================\n");
+
+        assert!(max_us < 100, "enumeration took {max_us}µs, expected <100µs");
+    }
+
+    // -- Async enumeration simulation --------------------------------------
+
+    #[test]
+    fn async_enumeration_feeds_grid() {
+        use std::sync::mpsc;
+        use std::thread;
+        use std::time::{Duration, Instant};
+
+        let (tx, rx) = mpsc::channel::<String>();
+
+        // Simulate an enumerator thread sending file names
+        thread::spawn(move || {
+            for i in 0..500 {
+                tx.send(format!("IMG_{i:05}.heic")).unwrap();
+                // Simulate filesystem latency — ~20µs per entry
+                thread::sleep(Duration::from_micros(20));
+            }
+        });
+
+        let mut g = Grid::new(GridConfig::default());
+        g.set_viewport_size(1200.0, 800.0);
+
+        let mut frames = 0;
+        let mut visible_counts = Vec::new();
+        let start = Instant::now();
+
+        // Simulate frame loop: poll channel, scroll around, enumerate visible
+        loop {
+            // Poll enumeration results (like the real app does in update())
+            let mut added = 0;
+            while let Ok(name) = rx.try_recv() {
+                g.add_tile(name);
+                added += 1;
+                // Batch limit per frame — avoid starving rendering
+                if added >= 50 {
+                    break;
+                }
+            }
+
+            // Simulate scrolling to different positions
+            let scroll = match frames % 5 {
+                0 => 0.0,
+                1 => g.content_height() * 0.25,
+                2 => g.content_height() * 0.5,
+                3 => g.content_height() * 0.75,
+                _ => g.content_height(),
+            };
+            g.set_scroll(scroll);
+
+            // Enumerate visible tiles
+            let visible: Vec<_> = g.visible_tile_info().collect();
+            visible_counts.push(visible.len());
+
+            // Validate all visible tiles
+            for &(idx, name, state) in &visible {
+                assert!(idx < g.tile_count());
+                assert!(!name.is_empty());
+                assert_eq!(state, TileState::NotLoaded);
+            }
+
+            frames += 1;
+
+            // Stop when enumeration is done and grid has all tiles
+            if g.tile_count() >= 500 {
+                break;
+            }
+
+            // Safety timeout
+            if start.elapsed() > Duration::from_secs(5) {
+                panic!("async enumeration didn't complete in 5 seconds");
+            }
+
+            thread::sleep(Duration::from_millis(1)); // ~1000fps frame loop
+        }
+
+        assert_eq!(g.tile_count(), 500);
+        assert_eq!(g.tile_name(0), "IMG_00000.heic");
+        assert_eq!(g.tile_name(499), "IMG_00499.heic");
+
+        println!("\n=== Async Enumeration Simulation ===");
+        println!("  Tiles:      {}", g.tile_count());
+        println!("  Frames:     {frames}");
+        println!(
+            "  Avg visible: {:.0}",
+            visible_counts.iter().sum::<usize>() as f64 / visible_counts.len() as f64
+        );
+        println!("====================================\n");
+    }
+
+    #[test]
+    fn visible_not_loaded_filter() {
+        // Simulates the future pattern: "give me visible tiles that need work"
+        let mut g = make_grid(100);
+        g.set_scroll(336.0); // rows 2..7
+
+        // Mark some tiles as loaded
+        for idx in 14..21 {
+            g.set_tile_state(idx, TileState::Loaded);
+        }
+
+        // Filter visible tiles to find ones still needing work
+        let need_work: Vec<usize> = g
+            .visible_tile_info()
+            .filter(|&(_, _, state)| state == TileState::NotLoaded)
+            .map(|(idx, _, _)| idx)
+            .collect();
+
+        // 35 visible - 7 loaded = 28 need work
+        assert_eq!(need_work.len(), 28);
+        // None of the loaded tiles should be in the list
+        for idx in 14..21 {
+            assert!(!need_work.contains(&idx));
         }
     }
 }

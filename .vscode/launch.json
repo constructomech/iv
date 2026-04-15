@@ -45,6 +45,21 @@
             "env": {
                 "IV_DEBUG": "1"
             }
+        },
+        {
+            "name": "Demo folder (release)",
+            "type": "lldb",
+            "request": "launch",
+            "program": "${workspaceFolder}/target/release/iv",
+            "args": [
+                "--demo",
+                "${input:imagePath}"
+            ],
+            "cwd": "${workspaceFolder}",
+            "preLaunchTask": "build release",
+            "env": {
+                "IV_DEBUG": "1"
+            }
         }
     ],
     "inputs": [

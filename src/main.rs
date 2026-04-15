@@ -19,17 +19,39 @@ fn main() {
 
     let args: Vec<String> = env::args().collect();
 
-    // --demo N: show a grid of N tiles (default 10000) with no real images
+    // --demo [N | path]: show a grid with synthetic tiles or enumerate a real folder
     let demo_mode = args.iter().any(|a| a == "--demo");
-    let demo_count: usize = args
-        .iter()
-        .position(|a| a == "--demo")
-        .and_then(|i| args.get(i + 1))
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(10_000);
 
     if demo_mode {
-        let title = format!("iv — demo ({demo_count} tiles)");
+        let demo_arg = args
+            .iter()
+            .position(|a| a == "--demo")
+            .and_then(|i| args.get(i + 1));
+
+        // Is the argument a number (synthetic) or a path (real folder)?
+        let (title, demo_source) = match demo_arg {
+            Some(s) if s.parse::<usize>().is_ok() => {
+                let count = s.parse::<usize>().unwrap();
+                (
+                    format!("iv — demo ({count} tiles)"),
+                    DemoSource::Synthetic(count),
+                )
+            }
+            Some(s) => {
+                let p = PathBuf::from(s);
+                if !p.is_dir() {
+                    eprintln!("Error: not a directory: {}", p.display());
+                    process::exit(1);
+                }
+                let name = p.file_name().unwrap_or_default().to_string_lossy();
+                (format!("iv — {name}"), DemoSource::Folder(p))
+            }
+            None => (
+                "iv — demo (10000 tiles)".to_string(),
+                DemoSource::Synthetic(10_000),
+            ),
+        };
+
         let native_options = eframe::NativeOptions {
             viewport: eframe::egui::ViewportBuilder::default()
                 .with_title(title)
@@ -40,7 +62,7 @@ fn main() {
         if let Err(e) = eframe::run_native(
             "iv",
             native_options,
-            Box::new(move |_cc| Ok(Box::new(DemoApp::new(demo_count)))),
+            Box::new(move |_cc| Ok(Box::new(DemoApp::new(demo_source)))),
         ) {
             eprintln!("Error running iv: {e}");
             process::exit(1);
@@ -98,21 +120,81 @@ fn main() {
     }
 }
 
-/// Minimal app that shows a grid of tiles with no real images.
+/// What the demo app is showing.
+enum DemoSource {
+    /// Synthetic grid with N tiles.
+    Synthetic(usize),
+    /// Enumerate a real folder.
+    Folder(PathBuf),
+}
+
+/// Minimal app that shows a grid of tiles — either synthetic or from a folder.
 struct DemoApp {
     grid_view: grid_view::GridView,
+    enum_handle: Option<enumerator::EnumHandle>,
+    enum_done: bool,
 }
 
 impl DemoApp {
-    fn new(count: usize) -> Self {
-        Self {
-            grid_view: grid_view::GridView::new_demo(count),
+    fn new(source: DemoSource) -> Self {
+        match source {
+            DemoSource::Synthetic(count) => Self {
+                grid_view: grid_view::GridView::new_demo(count),
+                enum_handle: None,
+                enum_done: true,
+            },
+            DemoSource::Folder(path) => Self {
+                grid_view: grid_view::GridView::new(grid::Grid::new(grid::GridConfig::default())),
+                enum_handle: Some(enumerator::enumerate_folder(path)),
+                enum_done: false,
+            },
+        }
+    }
+
+    fn poll_enumerator(&mut self) {
+        if let Some(ref handle) = self.enum_handle {
+            loop {
+                match handle.receiver.try_recv() {
+                    Ok(enumerator::EnumMessage::Found(path)) => {
+                        let name = path
+                            .file_name()
+                            .unwrap_or_default()
+                            .to_string_lossy()
+                            .into_owned();
+                        self.grid_view.grid_mut().add_tile(name);
+                    }
+                    Ok(enumerator::EnumMessage::Done(_)) => {
+                        self.enum_done = true;
+                        break;
+                    }
+                    Ok(enumerator::EnumMessage::Error(e)) => {
+                        log::error!("Enumeration error: {e}");
+                        self.enum_done = true;
+                        break;
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        self.enum_done = true;
+                        break;
+                    }
+                }
+            }
+        }
+        if self.enum_done {
+            self.enum_handle = None;
         }
     }
 }
 
 impl eframe::App for DemoApp {
     fn update(&mut self, ctx: &eframe::egui::Context, _frame: &mut eframe::Frame) {
+        self.poll_enumerator();
+
+        // Keep repainting while enumeration is in progress
+        if !self.enum_done {
+            ctx.request_repaint_after(std::time::Duration::from_millis(16));
+        }
+
         eframe::egui::CentralPanel::default()
             .frame(
                 eframe::egui::Frame::NONE

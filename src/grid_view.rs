@@ -30,8 +30,8 @@ impl GridView {
     /// Create a demo grid with `n` tiles, all in NotLoaded state.
     pub fn new_demo(n: usize) -> Self {
         let mut grid = Grid::new(GridConfig::default());
-        for _ in 0..n {
-            grid.add_tile();
+        for i in 0..n {
+            grid.add_tile(format!("img_{i:05}.jpg"));
         }
         Self {
             grid,
@@ -103,7 +103,9 @@ impl GridView {
                         ui.spacing_mut().item_spacing = egui::vec2(padding, 0.0);
                         for idx in row_start..row_end {
                             let state = self.grid.tile_state(idx);
-                            let response = Self::render_tile(ui, idx, state, tile_w, tile_h, debug);
+                            let name = self.grid.tile_name(idx);
+                            let response =
+                                Self::render_tile(ui, idx, name, state, tile_w, tile_h, debug);
                             if response.clicked() {
                                 clicked = Some(idx);
                             }
@@ -128,6 +130,7 @@ impl GridView {
     fn render_tile(
         ui: &mut egui::Ui,
         idx: usize,
+        name: &str,
         state: TileState,
         tile_w: f32,
         tile_h: f32,
@@ -156,6 +159,15 @@ impl GridView {
                     egui::Color32::from_rgba_premultiplied(255, 255, 255, 20),
                 );
             }
+
+            // Filename at bottom center
+            painter.text(
+                egui::pos2(rect.center().x, rect.max.y - 4.0),
+                egui::Align2::CENTER_BOTTOM,
+                name,
+                egui::FontId::proportional(10.0),
+                egui::Color32::from_rgb(170, 170, 170),
+            );
 
             // Debug: show state text and index
             if debug {
