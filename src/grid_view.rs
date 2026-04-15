@@ -95,6 +95,8 @@ struct TileTiming {
 pub struct GridView {
     grid: Grid,
     debug: bool,
+    /// Current tile size for the slider (pixels, square).
+    tile_size: f32,
     /// GPU textures, indexed same as grid tiles.
     textures: Vec<Option<egui::TextureHandle>>,
     /// Per-tile timing data for debug overlay.
@@ -215,6 +217,7 @@ impl GridView {
         }
 
         Self {
+            tile_size: grid.config().tile_width,
             grid,
             debug: debug_mode(),
             textures: Vec::new(),
@@ -472,11 +475,16 @@ impl GridView {
         );
         ui.add_space(4.0);
 
+        // Reserve space at the bottom for the tile size slider
+        let slider_height = 24.0;
+        let available_for_grid = ui.available_height() - slider_height - 4.0;
+
         let mut clicked = None;
 
         let sched_render_start = std::time::Instant::now();
         egui::ScrollArea::vertical()
             .auto_shrink([false; 2])
+            .max_height(available_for_grid)
             .show(ui, |ui| {
                 self.grid
                     .set_viewport_size(available_width, ui.clip_rect().height());
@@ -531,6 +539,23 @@ impl GridView {
                     ));
                 }
             });
+
+        // Tile size slider at bottom
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            ui.spacing_mut().slider_width = ui.available_width() - 80.0;
+            if ui
+                .add(egui::Slider::new(&mut self.tile_size, 60.0..=400.0).show_value(false))
+                .changed()
+            {
+                self.grid.set_tile_size(self.tile_size, self.tile_size);
+            }
+            ui.label(
+                egui::RichText::new(format!("{}px", self.tile_size as u32))
+                    .color(egui::Color32::from_rgb(140, 140, 140))
+                    .size(11.0),
+            );
+        });
 
         let render_ms = sched_render_start.elapsed().as_secs_f64() * 1000.0;
         let frame_ms = frame_start.elapsed().as_secs_f64() * 1000.0;

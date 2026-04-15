@@ -468,6 +468,16 @@ impl Grid {
         &self.config
     }
 
+    /// Set the tile display size. Re-clamps scroll position since the
+    /// content height changes when tile size changes.
+    pub fn set_tile_size(&mut self, width: f32, height: f32) {
+        self.config.tile_width = width;
+        self.config.tile_height = height;
+        // Re-clamp scroll — content height changed
+        let max_scroll = (self.content_height() - self.viewport.height).max(0.0);
+        self.viewport.scroll_y = self.viewport.scroll_y.clamp(0.0, max_scroll);
+    }
+
     pub fn viewport(&self) -> &Viewport {
         &self.viewport
     }
@@ -1161,5 +1171,75 @@ mod tests {
         // Full decode completed
         g.set_tile_state(0, TileState::Loaded);
         assert_eq!(g.tile_state(0), TileState::Loaded);
+    }
+
+    // -- Tile resize tests -------------------------------------------------
+
+    #[test]
+    fn set_tile_size_changes_layout() {
+        let mut g = make_grid(100); // 7 cols at 160px, 15 rows
+        assert_eq!(g.cols(), 7);
+        assert_eq!(g.total_rows(), 15);
+
+        // Make tiles bigger → fewer columns → more rows
+        g.set_tile_size(300.0, 300.0);
+        // cell_width = 300 + 8 = 308, (1200 + 8) / 308 = 3.9 → 3 cols
+        assert_eq!(g.cols(), 3);
+        // 100 / 3 = 34 rows
+        assert_eq!(g.total_rows(), 34);
+
+        // Make tiles smaller → more columns → fewer rows
+        g.set_tile_size(80.0, 80.0);
+        // cell_width = 80 + 8 = 88, (1200 + 8) / 88 = 13.7 → 13 cols
+        assert_eq!(g.cols(), 13);
+        // 100 / 13 = 8 rows
+        assert_eq!(g.total_rows(), 8);
+    }
+
+    #[test]
+    fn scroll_clamped_after_tile_resize() {
+        let mut g = make_grid(100);
+        // Scroll to the bottom
+        g.set_scroll(99999.0);
+        let scroll_before = g.scroll_y();
+        assert!(scroll_before > 0.0);
+
+        // Make tiles much bigger → content height grows, but fewer fit
+        // so max_scroll changes
+        g.set_tile_size(300.0, 300.0);
+        let scroll_after = g.scroll_y();
+
+        // Scroll should be re-clamped to valid range
+        let max_scroll = (g.content_height() - g.viewport().height).max(0.0);
+        assert!(
+            scroll_after <= max_scroll,
+            "scroll {scroll_after} exceeds max {max_scroll}"
+        );
+    }
+
+    #[test]
+    fn tile_resize_preserves_visible_invariants() {
+        let mut g = make_grid(200);
+
+        let sizes: &[(f32, f32)] = &[
+            (80.0, 80.0),
+            (120.0, 120.0),
+            (160.0, 160.0),
+            (200.0, 200.0),
+            (320.0, 320.0),
+        ];
+
+        for &(w, h) in sizes {
+            g.set_tile_size(w, h);
+            g.set_scroll(g.content_height() / 2.0);
+
+            let vr = g.visible_rows();
+            assert!(vr.first <= vr.last, "invalid range at size {w}x{h}");
+            assert!(vr.last <= g.total_rows(), "visible past total at {w}x{h}");
+
+            let (start, end) = g.visible_tile_range();
+            assert!(end <= g.tile_count(), "tile range past count at {w}x{h}");
+            assert!(start <= end);
+        }
     }
 }
