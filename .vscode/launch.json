@@ -30,6 +30,21 @@
                 "RUST_LOG": "info",
                 "IV_DEBUG": "1"
             }
+        },
+        {
+            "name": "Release with logging",
+            "type": "lldb",
+            "request": "launch",
+            "program": "${workspaceFolder}/target/release/iv",
+            "args": [
+                "${input:imagePath}",
+                "--log"
+            ],
+            "cwd": "${workspaceFolder}",
+            "preLaunchTask": "build release",
+            "env": {
+                "IV_DEBUG": "1"
+            }
         }
     ],
     "inputs": [

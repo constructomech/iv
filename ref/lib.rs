@@ -5,8 +5,6 @@ mod app;
 mod decode;
 mod enumerator;
 mod folder_view;
-pub mod grid;
-mod grid_view;
 mod image_view;
 mod scheduler;
 
