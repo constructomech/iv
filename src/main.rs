@@ -1,6 +1,9 @@
+use rust_i18n::t;
 use std::env;
 use std::path::PathBuf;
 use std::process;
+
+rust_i18n::i18n!("locales", fallback = "en");
 
 mod app;
 mod decode;
@@ -30,20 +33,23 @@ fn main() {
     let path = match path {
         Some(p) => p,
         None => {
-            eprintln!("Usage: iv <image-or-folder-path> [--log]");
+            eprintln!("{}", t!("usage"));
             process::exit(1);
         }
     };
 
     if !path.exists() {
-        eprintln!("Error: path does not exist: {}", path.display());
+        eprintln!(
+            "{}",
+            t!("error.path_not_found", path = path.display().to_string())
+        );
         process::exit(1);
     }
 
     let is_folder = path.is_dir();
-    let title = format!(
-        "iv — {}",
-        path.file_name().unwrap_or_default().to_string_lossy()
+    let title = t!(
+        "window.title",
+        name = path.file_name().unwrap_or_default().to_string_lossy()
     );
 
     let native_options = eframe::NativeOptions {
@@ -64,7 +70,7 @@ fn main() {
             }
         }),
     ) {
-        eprintln!("Error running iv: {e}");
+        eprintln!("{}", t!("error.app_failed", err = e.to_string()));
         process::exit(1);
     }
 }
@@ -179,7 +185,7 @@ impl Drop for IvApp {
     fn drop(&mut self) {
         let log_path = std::env::temp_dir().join("iv_grid_log.json");
         if let Some(path) = self.grid_view.grid().dump_log(&log_path) {
-            eprintln!("Grid activity log written to: {}", path.display());
+            eprintln!("{}", t!("log.written", path = path.display().to_string()));
         }
     }
 }

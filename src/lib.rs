@@ -1,6 +1,8 @@
 // lib.rs — expose decode functions for examples/diagnostics
 #![allow(dead_code)]
 
+rust_i18n::i18n!("locales", fallback = "en");
+
 mod app;
 mod decode;
 mod enumerator;

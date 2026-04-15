@@ -397,7 +397,7 @@ impl GridView {
         // Status bar
         let total = self.grid.tile_count();
         ui.label(
-            egui::RichText::new(format!("{total} tiles"))
+            egui::RichText::new(rust_i18n::t!("status.item_count", count = total))
                 .color(egui::Color32::from_rgb(180, 180, 180))
                 .size(13.0),
         );

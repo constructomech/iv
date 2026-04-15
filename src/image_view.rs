@@ -99,7 +99,7 @@ impl ImageView {
                 }
                 Err(mpsc::TryRecvError::Disconnected) => {
                     if self.texture.is_none() && self.error.is_none() {
-                        self.error = Some("Image load failed (worker crashed)".to_string());
+                        self.error = Some(rust_i18n::t!("error.load_failed").to_string());
                     }
                     self.loader = None;
                 }
@@ -177,7 +177,12 @@ impl ImageView {
             .and_then(|p| p.file_name())
             .unwrap_or_default()
             .to_string_lossy();
-        let status = format!("{} — {}/{}", filename, self.current + 1, self.paths.len());
+        let status = rust_i18n::t!(
+            "image.status",
+            filename = filename,
+            current = self.current + 1,
+            total = self.paths.len()
+        );
         ui.label(
             egui::RichText::new(status)
                 .color(egui::Color32::from_rgb(180, 180, 180))

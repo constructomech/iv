@@ -1,0 +1,18 @@
+status:
+  item_count: "%{count} items"
+
+window:
+  title: "iv — %{name}"
+
+image:
+  status: "%{filename} — %{current}/%{total}"
+
+error:
+  path_not_found: "Error: path does not exist: %{path}"
+  app_failed: "Error running iv: %{err}"
+  load_failed: "Image load failed (worker crashed)"
+
+usage: "Usage: iv <image-or-folder-path> [--log]"
+
+log:
+  written: "Grid activity log written to: %{path}"
