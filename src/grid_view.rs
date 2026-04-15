@@ -46,6 +46,8 @@ struct WorkRequest {
     path: PathBuf,
     generation: u64,
     tier: WorkTier,
+    /// Pre-loaded file bytes (avoids re-reading for FullDecode after EmbeddedMiss).
+    data: Option<Vec<u8>>,
 }
 
 /// A completed result from a decode worker.
@@ -56,8 +58,12 @@ enum WorkResult {
         image: DecodedImage,
         ms: f64,
     },
-    /// No embedded thumbnail found.
-    EmbeddedMiss { idx: usize, ms: f64 },
+    /// No embedded thumbnail found. Includes file bytes for reuse.
+    EmbeddedMiss {
+        idx: usize,
+        ms: f64,
+        data: Option<Vec<u8>>,
+    },
     /// Full decode completed.
     FullOk {
         idx: usize,
@@ -93,6 +99,8 @@ pub struct GridView {
     textures: Vec<Option<egui::TextureHandle>>,
     /// Per-tile timing data for debug overlay.
     timings: Vec<TileTiming>,
+    /// Cached file bytes from HEIC embedded extraction (avoids re-read for full decode).
+    cached_data: Vec<Option<Vec<u8>>>,
     /// Worker pool channels.
     work_tx: crossbeam_channel::Sender<WorkRequest>,
     work_rx: crossbeam_channel::Receiver<WorkRequest>,
@@ -129,67 +137,37 @@ impl GridView {
 
                     match req.tier {
                         WorkTier::EmbeddedOnly => {
+                            let start = std::time::Instant::now();
                             if decode::is_heif_extension(&req.path) {
-                                // HEIC: read file once, try BMFF thumbnail,
-                                // and if it misses, do full decode from same buffer.
-                                // This avoids reading a 3MB file over network twice.
-                                let start = std::time::Instant::now();
-                                let data = match std::fs::read(&req.path) {
-                                    Ok(d) => d,
-                                    Err(_) => {
-                                        let _ = result_tx.send(WorkResult::Failed { idx: req.idx });
-                                        continue;
-                                    }
-                                };
-                                let read_ms = start.elapsed().as_secs_f64() * 1000.0;
-
-                                // Try BMFF thumbnail from in-memory buffer
-                                let thumb_start = std::time::Instant::now();
-                                let thumb = decode::try_heif_thumbnail_from_bytes(&data);
-                                let thumb_ms =
-                                    read_ms + thumb_start.elapsed().as_secs_f64() * 1000.0;
-
-                                match thumb {
-                                    Some(image) => {
-                                        let _ = result_tx.send(WorkResult::EmbeddedOk {
-                                            idx: req.idx,
-                                            image,
-                                            ms: thumb_ms,
-                                        });
-                                    }
-                                    None => {
-                                        // No BMFF thumbnail — do full decode
-                                        // from the already-loaded buffer
-                                        let _ = result_tx.send(WorkResult::EmbeddedMiss {
-                                            idx: req.idx,
-                                            ms: thumb_ms,
-                                        });
-
-                                        if req.generation < generation.load(Ordering::Relaxed) {
-                                            continue;
-                                        }
-
-                                        let full_start = std::time::Instant::now();
-                                        match decode::decode_from_bytes(&data, THUMB_SIZE) {
-                                            Ok((image, _)) => {
-                                                let full_ms = read_ms
-                                                    + full_start.elapsed().as_secs_f64() * 1000.0;
-                                                let _ = result_tx.send(WorkResult::FullOk {
+                                // HEIC: read full file for BMFF parsing.
+                                // Cache bytes so FullDecode won't re-read.
+                                match std::fs::read(&req.path) {
+                                    Ok(data) => {
+                                        let thumb = decode::try_heif_thumbnail_from_bytes(&data);
+                                        let ms = start.elapsed().as_secs_f64() * 1000.0;
+                                        match thumb {
+                                            Some(image) => {
+                                                let _ = result_tx.send(WorkResult::EmbeddedOk {
                                                     idx: req.idx,
                                                     image,
-                                                    ms: full_ms,
+                                                    ms,
                                                 });
                                             }
-                                            Err(_) => {
-                                                let _ = result_tx
-                                                    .send(WorkResult::Failed { idx: req.idx });
+                                            None => {
+                                                let _ = result_tx.send(WorkResult::EmbeddedMiss {
+                                                    idx: req.idx,
+                                                    ms,
+                                                    data: Some(data),
+                                                });
                                             }
                                         }
+                                    }
+                                    Err(_) => {
+                                        let _ = result_tx.send(WorkResult::Failed { idx: req.idx });
                                     }
                                 }
                             } else {
                                 // Non-HEIC: fast 256KB EXIF-only read
-                                let start = std::time::Instant::now();
                                 let (result, _) = decode::try_exif_only(&req.path);
                                 let ms = start.elapsed().as_secs_f64() * 1000.0;
                                 match result {
@@ -201,17 +179,21 @@ impl GridView {
                                         });
                                     }
                                     None => {
-                                        let _ = result_tx
-                                            .send(WorkResult::EmbeddedMiss { idx: req.idx, ms });
+                                        let _ = result_tx.send(WorkResult::EmbeddedMiss {
+                                            idx: req.idx,
+                                            ms,
+                                            data: None,
+                                        });
                                     }
                                 }
                             }
                         }
                         WorkTier::FullDecode => {
                             let start = std::time::Instant::now();
-                            let result = std::fs::read(&req.path)
-                                .ok()
-                                .and_then(|data| decode::decode_from_bytes(&data, THUMB_SIZE).ok());
+                            // Use cached data if available, otherwise read
+                            let data = req.data.or_else(|| std::fs::read(&req.path).ok());
+                            let result =
+                                data.and_then(|d| decode::decode_from_bytes(&d, THUMB_SIZE).ok());
                             let ms = start.elapsed().as_secs_f64() * 1000.0;
                             match result {
                                 Some((image, _)) => {
@@ -237,6 +219,7 @@ impl GridView {
             debug: debug_mode(),
             textures: Vec::new(),
             timings: Vec::new(),
+            cached_data: Vec::new(),
             work_tx,
             work_rx,
             result_rx,
@@ -274,6 +257,9 @@ impl GridView {
         while self.timings.len() <= idx {
             self.timings.push(TileTiming::default());
         }
+        while self.cached_data.len() <= idx {
+            self.cached_data.push(None);
+        }
     }
 
     fn poll_results(&mut self, ctx: &egui::Context) {
@@ -305,10 +291,13 @@ impl GridView {
                         self.grid.set_tile_state(idx, TileState::Loaded);
                     }
                 }
-                WorkResult::EmbeddedMiss { idx, ms } => {
+                WorkResult::EmbeddedMiss { idx, ms, data } => {
                     if idx < self.grid.tile_count() {
                         self.ensure_vecs(idx);
                         self.timings[idx].embedded_ms = ms;
+                        if data.is_some() {
+                            self.cached_data[idx] = data;
+                        }
                         self.grid.record_event(GridEventKind::ResultReceived {
                             idx,
                             kind: "embedded_miss".into(),
@@ -377,6 +366,7 @@ impl GridView {
                     path,
                     generation: current_gen,
                     tier: WorkTier::EmbeddedOnly,
+                    data: None,
                 });
                 scheduled_indices.push(idx);
                 scheduled += 1;
@@ -403,11 +393,18 @@ impl GridView {
                 continue;
             }
             self.grid.set_tile_state(idx, TileState::CreatingThumbnail);
+            // Pass cached file bytes if available (avoids re-reading HEIC from network)
+            let cached = if idx < self.cached_data.len() {
+                self.cached_data[idx].take()
+            } else {
+                None
+            };
             let _ = self.work_tx.send(WorkRequest {
                 idx,
                 path,
                 generation: current_gen,
                 tier: WorkTier::FullDecode,
+                data: cached,
             });
             scheduled_indices.push(idx);
             scheduled += 1;
