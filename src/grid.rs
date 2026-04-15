@@ -13,6 +13,8 @@ pub enum TileState {
     NotLoaded,
     /// Extracting embedded thumbnail (EXIF/BMFF).
     LoadingEmbedded,
+    /// Embedded extraction done, no thumbnail found — awaiting full decode.
+    EmbeddedMissed,
     /// Full decode + downscale in progress.
     CreatingThumbnail,
     /// Thumbnail is ready for display.
@@ -24,6 +26,7 @@ impl std::fmt::Display for TileState {
         match self {
             TileState::NotLoaded => write!(f, "not loaded"),
             TileState::LoadingEmbedded => write!(f, "loading…"),
+            TileState::EmbeddedMissed => write!(f, "no embed"),
             TileState::CreatingThumbnail => write!(f, "creating…"),
             TileState::Loaded => write!(f, "loaded"),
         }
@@ -176,6 +179,63 @@ impl Grid {
     /// Take and clear the activity log.
     pub fn take_log(&mut self) -> Vec<GridEvent> {
         std::mem::take(&mut self.log)
+    }
+
+    /// Write the activity log to a JSON file.
+    /// Returns the path written, or None if logging is disabled/empty.
+    pub fn dump_log(&self, path: &Path) -> Option<PathBuf> {
+        if self.log.is_empty() {
+            return None;
+        }
+        let mut out = String::from("[\n");
+        for (i, event) in self.log.iter().enumerate() {
+            if i > 0 {
+                out.push_str(",\n");
+            }
+            let kind_json = match &event.kind {
+                GridEventKind::TilesAdded { count, first_idx } => {
+                    format!(r#"{{"type":"tiles_added","count":{count},"first_idx":{first_idx}}}"#)
+                }
+                GridEventKind::Scrolled {
+                    scroll_y,
+                    visible_first,
+                    visible_last,
+                } => {
+                    format!(
+                        r#"{{"type":"scrolled","scroll_y":{scroll_y:.1},"visible_first":{visible_first},"visible_last":{visible_last}}}"#
+                    )
+                }
+                GridEventKind::StateChange { idx, from, to } => {
+                    format!(r#"{{"type":"state_change","idx":{idx},"from":"{from}","to":"{to}"}}"#)
+                }
+                GridEventKind::WorkScheduled { indices, tier } => {
+                    let idx_str: Vec<String> = indices.iter().map(|i| i.to_string()).collect();
+                    format!(
+                        r#"{{"type":"work_scheduled","tier":"{tier}","count":{},"indices":[{}]}}"#,
+                        indices.len(),
+                        idx_str.join(",")
+                    )
+                }
+                GridEventKind::ResultReceived { idx, kind, ms } => {
+                    format!(r#"{{"type":"result","idx":{idx},"kind":"{kind}","ms":{ms:.2}}}"#)
+                }
+                GridEventKind::GenerationBump { generation } => {
+                    format!(r#"{{"type":"generation_bump","generation":{generation}}}"#)
+                }
+            };
+            out.push_str(&format!(
+                r#"  {{"time_us":{},"event":{kind_json}}}"#,
+                event.time_us
+            ));
+        }
+        out.push_str("\n]\n");
+
+        let dest = path.to_path_buf();
+        if std::fs::write(&dest, &out).is_ok() {
+            Some(dest)
+        } else {
+            None
+        }
     }
 
     fn record(&mut self, kind: GridEventKind) {
@@ -504,6 +564,7 @@ mod tests {
     fn tile_state_display() {
         assert_eq!(TileState::NotLoaded.to_string(), "not loaded");
         assert_eq!(TileState::LoadingEmbedded.to_string(), "loading…");
+        assert_eq!(TileState::EmbeddedMissed.to_string(), "no embed");
         assert_eq!(TileState::CreatingThumbnail.to_string(), "creating…");
         assert_eq!(TileState::Loaded.to_string(), "loaded");
     }
@@ -985,5 +1046,99 @@ mod tests {
         for idx in 14..21 {
             assert!(!need_work.contains(&idx));
         }
+    }
+
+    // -- State machine correctness -----------------------------------------
+
+    #[test]
+    fn no_duplicate_scheduling_for_full_decode() {
+        // Reproduces the bug from the real log where CreatingThumbnail tiles
+        // were re-scheduled for full_decode every frame because the state
+        // didn't transition to prevent re-scheduling.
+        let mut g = make_grid(35); // ~5 rows visible
+        g.enable_logging();
+
+        // Phase 1: all tiles go through embedded extraction
+        for idx in 0..35 {
+            g.set_tile_state(idx, TileState::LoadingEmbedded);
+        }
+
+        // Some succeed, some miss
+        for idx in 0..35 {
+            if idx % 3 == 0 {
+                g.set_tile_state(idx, TileState::EmbeddedMissed); // needs full decode
+            } else {
+                g.set_tile_state(idx, TileState::Loaded); // embedded ok
+            }
+        }
+
+        // Phase 2: schedule full decode for EmbeddedMissed tiles
+        let needs_full = g.visible_in_state(TileState::EmbeddedMissed);
+        assert!(!needs_full.is_empty());
+
+        // Transition to CreatingThumbnail (as schedule_visible_work should)
+        for &idx in &needs_full {
+            g.set_tile_state(idx, TileState::CreatingThumbnail);
+        }
+
+        // Now check: there should be NO EmbeddedMissed or CreatingThumbnail
+        // tiles returned by visible_in_state for scheduling
+        let still_needs_full = g.visible_in_state(TileState::EmbeddedMissed);
+        assert!(
+            still_needs_full.is_empty(),
+            "EmbeddedMissed tiles should not be re-schedulable: {:?}",
+            still_needs_full
+        );
+
+        // CreatingThumbnail means "in-flight" — should NOT be scheduled again
+        let creating = g.visible_in_state(TileState::CreatingThumbnail);
+        assert!(
+            !creating.is_empty(),
+            "should have in-flight CreatingThumbnail tiles"
+        );
+
+        // Simulate completion
+        for &idx in &needs_full {
+            g.set_tile_state(idx, TileState::Loaded);
+        }
+
+        // Everything should be loaded now
+        let remaining = g.visible_in_state(TileState::EmbeddedMissed);
+        assert!(remaining.is_empty());
+        let creating = g.visible_in_state(TileState::CreatingThumbnail);
+        assert!(creating.is_empty());
+    }
+
+    #[test]
+    fn state_machine_full_lifecycle() {
+        // Test the complete state machine: NotLoaded -> LoadingEmbedded ->
+        // EmbeddedMissed -> CreatingThumbnail -> Loaded
+        let mut g = make_grid(1);
+
+        assert_eq!(g.tile_state(0), TileState::NotLoaded);
+
+        // Scheduled for embedded extraction
+        g.set_tile_state(0, TileState::LoadingEmbedded);
+        assert_eq!(g.tile_state(0), TileState::LoadingEmbedded);
+
+        // Embedded extraction failed
+        g.set_tile_state(0, TileState::EmbeddedMissed);
+        assert_eq!(g.tile_state(0), TileState::EmbeddedMissed);
+
+        // Verify it shows up as needing full decode
+        let needs_full = g.visible_in_state(TileState::EmbeddedMissed);
+        assert_eq!(needs_full, vec![0]);
+
+        // Scheduled for full decode
+        g.set_tile_state(0, TileState::CreatingThumbnail);
+        assert_eq!(g.tile_state(0), TileState::CreatingThumbnail);
+
+        // Should NOT show up as needing scheduling anymore
+        let needs_full = g.visible_in_state(TileState::EmbeddedMissed);
+        assert!(needs_full.is_empty());
+
+        // Full decode completed
+        g.set_tile_state(0, TileState::Loaded);
+        assert_eq!(g.tile_state(0), TileState::Loaded);
     }
 }

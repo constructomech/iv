@@ -248,7 +248,7 @@ impl GridView {
                             kind: "embedded_miss".into(),
                             ms,
                         });
-                        self.grid.set_tile_state(idx, TileState::CreatingThumbnail);
+                        self.grid.set_tile_state(idx, TileState::EmbeddedMissed);
                     }
                 }
                 WorkResult::FullOk { idx, image, ms } => {
@@ -325,7 +325,7 @@ impl GridView {
         }
 
         // Phase 2: full decode for tiles where embedded failed
-        let needs_full = self.grid.visible_in_state(TileState::CreatingThumbnail);
+        let needs_full = self.grid.visible_in_state(TileState::EmbeddedMissed);
         let mut scheduled_indices = Vec::new();
         let mut scheduled = 0;
         for idx in needs_full {
@@ -336,6 +336,7 @@ impl GridView {
             if path.as_os_str().is_empty() {
                 continue;
             }
+            self.grid.set_tile_state(idx, TileState::CreatingThumbnail);
             let _ = self.work_tx.send(WorkRequest {
                 idx,
                 path,
@@ -365,7 +366,9 @@ impl GridView {
             let mut reset_count = 0;
             for idx in 0..self.grid.tile_count() {
                 match self.grid.tile_state(idx) {
-                    TileState::LoadingEmbedded | TileState::CreatingThumbnail => {
+                    TileState::LoadingEmbedded
+                    | TileState::EmbeddedMissed
+                    | TileState::CreatingThumbnail => {
                         self.grid.set_tile_state(idx, TileState::NotLoaded);
                         reset_count += 1;
                     }
@@ -468,6 +471,10 @@ impl GridView {
                     .is_empty()
                 || !self
                     .grid
+                    .visible_in_state(TileState::EmbeddedMissed)
+                    .is_empty()
+                || !self
+                    .grid
                     .visible_in_state(TileState::CreatingThumbnail)
                     .is_empty();
             if has_pending {
@@ -521,6 +528,7 @@ impl GridView {
                 let bg = match state {
                     TileState::NotLoaded => egui::Color32::from_rgb(48, 48, 48),
                     TileState::LoadingEmbedded => egui::Color32::from_rgb(60, 55, 40),
+                    TileState::EmbeddedMissed => egui::Color32::from_rgb(55, 45, 45),
                     TileState::CreatingThumbnail => egui::Color32::from_rgb(40, 55, 60),
                     TileState::Loaded => egui::Color32::from_rgb(35, 60, 35),
                 };

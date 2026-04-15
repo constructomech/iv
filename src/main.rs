@@ -225,3 +225,12 @@ impl eframe::App for DemoApp {
             });
     }
 }
+
+impl Drop for DemoApp {
+    fn drop(&mut self) {
+        let log_path = std::env::temp_dir().join("iv_grid_log.json");
+        if let Some(path) = self.grid_view.grid().dump_log(&log_path) {
+            eprintln!("Grid activity log written to: {}", path.display());
+        }
+    }
+}
