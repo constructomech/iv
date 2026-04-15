@@ -209,6 +209,53 @@ pub fn try_heif_thumbnail(path: &Path) -> Option<DecodedImage> {
     })
 }
 
+/// Try to extract the HEIF/HEIC container-level thumbnail from in-memory bytes.
+/// Same as `try_heif_thumbnail` but avoids a separate file read.
+pub fn try_heif_thumbnail_from_bytes(data: &[u8]) -> Option<DecodedImage> {
+    use libheif_rs::{ColorSpace, LibHeif, RgbChroma};
+
+    let ctx = libheif_rs::HeifContext::read_from_bytes(data).ok()?;
+    let handle = ctx.primary_image_handle().ok()?;
+
+    if handle.number_of_thumbnails() == 0 {
+        return None;
+    }
+
+    let mut thumb_ids = vec![0u32; 1];
+    handle.thumbnail_ids(&mut thumb_ids);
+    let thumb_handle = handle.thumbnail(thumb_ids[0]).ok()?;
+
+    let lib_heif = LibHeif::new();
+    let image = lib_heif
+        .decode(&thumb_handle, ColorSpace::Rgb(RgbChroma::Rgba), None)
+        .ok()?;
+
+    let planes = image.planes();
+    let plane = planes.interleaved?;
+    let width = image.width();
+    let height = image.height();
+    let stride = plane.stride;
+    let data = plane.data;
+
+    let row_bytes = width as usize * 4;
+    let pixels = if stride == row_bytes {
+        data[..row_bytes * height as usize].to_vec()
+    } else {
+        let mut pixels = Vec::with_capacity(row_bytes * height as usize);
+        for y in 0..height as usize {
+            let row_start = y * stride;
+            pixels.extend_from_slice(&data[row_start..row_start + row_bytes]);
+        }
+        pixels
+    };
+
+    Some(DecodedImage {
+        width,
+        height,
+        pixels,
+    })
+}
+
 /// Try to extract the EXIF embedded thumbnail from file bytes.
 pub fn extract_exif_thumbnail(data: &[u8]) -> Option<DecodedImage> {
     let cursor = Cursor::new(data);

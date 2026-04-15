@@ -129,20 +129,81 @@ impl GridView {
 
                     match req.tier {
                         WorkTier::EmbeddedOnly => {
-                            let start = std::time::Instant::now();
-                            let (result, _) = decode::try_exif_only(&req.path);
-                            let ms = start.elapsed().as_secs_f64() * 1000.0;
-                            match result {
-                                Some(image) => {
-                                    let _ = result_tx.send(WorkResult::EmbeddedOk {
-                                        idx: req.idx,
-                                        image,
-                                        ms,
-                                    });
+                            if decode::is_heif_extension(&req.path) {
+                                // HEIC: read file once, try BMFF thumbnail,
+                                // and if it misses, do full decode from same buffer.
+                                // This avoids reading a 3MB file over network twice.
+                                let start = std::time::Instant::now();
+                                let data = match std::fs::read(&req.path) {
+                                    Ok(d) => d,
+                                    Err(_) => {
+                                        let _ = result_tx.send(WorkResult::Failed { idx: req.idx });
+                                        continue;
+                                    }
+                                };
+                                let read_ms = start.elapsed().as_secs_f64() * 1000.0;
+
+                                // Try BMFF thumbnail from in-memory buffer
+                                let thumb_start = std::time::Instant::now();
+                                let thumb = decode::try_heif_thumbnail_from_bytes(&data);
+                                let thumb_ms =
+                                    read_ms + thumb_start.elapsed().as_secs_f64() * 1000.0;
+
+                                match thumb {
+                                    Some(image) => {
+                                        let _ = result_tx.send(WorkResult::EmbeddedOk {
+                                            idx: req.idx,
+                                            image,
+                                            ms: thumb_ms,
+                                        });
+                                    }
+                                    None => {
+                                        // No BMFF thumbnail — do full decode
+                                        // from the already-loaded buffer
+                                        let _ = result_tx.send(WorkResult::EmbeddedMiss {
+                                            idx: req.idx,
+                                            ms: thumb_ms,
+                                        });
+
+                                        if req.generation < generation.load(Ordering::Relaxed) {
+                                            continue;
+                                        }
+
+                                        let full_start = std::time::Instant::now();
+                                        match decode::decode_from_bytes(&data, THUMB_SIZE) {
+                                            Ok((image, _)) => {
+                                                let full_ms = read_ms
+                                                    + full_start.elapsed().as_secs_f64() * 1000.0;
+                                                let _ = result_tx.send(WorkResult::FullOk {
+                                                    idx: req.idx,
+                                                    image,
+                                                    ms: full_ms,
+                                                });
+                                            }
+                                            Err(_) => {
+                                                let _ = result_tx
+                                                    .send(WorkResult::Failed { idx: req.idx });
+                                            }
+                                        }
+                                    }
                                 }
-                                None => {
-                                    let _ = result_tx
-                                        .send(WorkResult::EmbeddedMiss { idx: req.idx, ms });
+                            } else {
+                                // Non-HEIC: fast 256KB EXIF-only read
+                                let start = std::time::Instant::now();
+                                let (result, _) = decode::try_exif_only(&req.path);
+                                let ms = start.elapsed().as_secs_f64() * 1000.0;
+                                match result {
+                                    Some(image) => {
+                                        let _ = result_tx.send(WorkResult::EmbeddedOk {
+                                            idx: req.idx,
+                                            image,
+                                            ms,
+                                        });
+                                    }
+                                    None => {
+                                        let _ = result_tx
+                                            .send(WorkResult::EmbeddedMiss { idx: req.idx, ms });
+                                    }
                                 }
                             }
                         }
