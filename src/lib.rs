@@ -10,9 +10,11 @@ mod scheduler;
 
 pub use app::DecodedImage;
 pub use decode::{
-    DecodeTimings, decode_thumbnail, decode_thumbnail_progressive, extract_exif_thumbnail,
-    is_heif_extension, try_heif_thumbnail,
+    DecodeTimings, decode_from_bytes, decode_thumbnail, decode_thumbnail_progressive,
+    extract_exif_thumbnail, is_heif_extension, try_exif_only, try_heif_thumbnail,
 };
+pub use enumerator::{EnumHandle, EnumMessage, enumerate_folder};
+pub use scheduler::{EntryState, Scheduler, ThumbState, WorkItem, WorkTier};
 
 /// Register HEIF/HEIC decoder hooks so the `image` crate can decode these formats.
 /// Call once at startup before decoding any HEIC files.

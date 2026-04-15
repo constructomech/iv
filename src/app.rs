@@ -57,10 +57,8 @@ pub fn center_offset(inner: (f32, f32), outer: (f32, f32)) -> (f32, f32) {
 /// Recognized image file extensions (lowercase, without dot).
 pub const IMAGE_EXTENSIONS: &[&str] = &[
     // Common raster
-    "jpg", "jpeg", "png", "webp", "tiff", "tif", "bmp", "gif",
-    // HEIF/HEIC
-    "heic", "heif",
-    // RAW (first-class — we extract embedded JPEG previews)
+    "jpg", "jpeg", "png", "webp", "tiff", "tif", "bmp", "gif", // HEIF/HEIC
+    "heic", "heif", // RAW (first-class — we extract embedded JPEG previews)
     "dng", "cr2", "cr3", "nef", "arw", "orf", "rw2", "raf",
 ];
 

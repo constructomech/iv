@@ -187,6 +187,8 @@ enum ThumbResult {
 /// Manages a pool of worker threads that decode thumbnails.
 struct ThumbLoader {
     work_tx: crossbeam_channel::Sender<WorkItem>,
+    /// Clone of the work receiver — used to drain stale items on generation bump.
+    work_rx: crossbeam_channel::Receiver<WorkItem>,
     result_rx: crossbeam_channel::Receiver<ThumbResult>,
     /// Shared generation counter — workers check this to skip stale items.
     generation: Arc<AtomicU64>,
@@ -279,6 +281,7 @@ impl ThumbLoader {
 
         Self {
             work_tx,
+            work_rx,
             result_rx,
             generation,
         }
@@ -291,9 +294,21 @@ impl ThumbLoader {
         }
     }
 
-    /// Sync the shared generation counter with the scheduler's.
+    /// Sync the shared generation counter with the scheduler's,
+    /// and drain stale items from the work channel so workers
+    /// pick up new visible work immediately.
     fn sync_generation(&self, generation: u64) {
         self.generation.store(generation, Ordering::Relaxed);
+        // Drain stale work items from the channel. Workers would skip them
+        // anyway (generation check), but clearing the channel means new
+        // high-priority items don't queue behind hundreds of stale ones.
+        let mut drained = 0;
+        while let Ok(_) = self.work_rx.try_recv() {
+            drained += 1;
+        }
+        if drained > 0 {
+            log::debug!("Drained {drained} stale work items from channel (gen={generation})");
+        }
     }
 }
 
@@ -371,19 +386,22 @@ impl FolderView {
     }
 
     /// Drain completed results from the loader and update scheduler/textures.
+    /// Caps results processed per frame to keep frame time consistent.
     fn poll_thumbnails(&mut self, ctx: &egui::Context) {
-        let mut exif_ok = 0u32;
-        let mut exif_miss = 0u32;
-        let mut full_ok = 0u32;
-        let mut full_err = 0u32;
-        while let Ok(result) = self.thumb_loader.result_rx.try_recv() {
+        const MAX_RESULTS_PER_FRAME: usize = 16;
+        let mut processed = 0usize;
+        while processed < MAX_RESULTS_PER_FRAME {
+            let result = match self.thumb_loader.result_rx.try_recv() {
+                Ok(r) => r,
+                Err(_) => break,
+            };
+            processed += 1;
             match result {
                 ThumbResult::ExifOk {
                     idx,
                     image,
                     timings,
                 } => {
-                    exif_ok += 1;
                     if idx < self.scheduler.len() {
                         let size = [image.width as usize, image.height as usize];
                         let color_image =
@@ -398,7 +416,6 @@ impl FolderView {
                     }
                 }
                 ThumbResult::ExifMiss { idx, timings } => {
-                    exif_miss += 1;
                     if idx < self.scheduler.len() {
                         self.scheduler.exif_failed(idx, timings);
                     }
@@ -408,7 +425,6 @@ impl FolderView {
                     image,
                     timings,
                 } => {
-                    full_ok += 1;
                     if idx < self.scheduler.len() {
                         let size = [image.width as usize, image.height as usize];
                         let color_image =
@@ -423,7 +439,6 @@ impl FolderView {
                     }
                 }
                 ThumbResult::FullErr { idx, error } => {
-                    full_err += 1;
                     if idx < self.scheduler.len() {
                         log::warn!(
                             "Thumbnail failed for {}: {error}",
@@ -434,27 +449,19 @@ impl FolderView {
                 }
             }
         }
-        let total = exif_ok + exif_miss + full_ok + full_err;
-        if total > 0 {
-            log::debug!(
-                "poll_thumbnails: {} results (exif_ok={}, exif_miss={}, full_ok={}, full_err={})",
-                total,
-                exif_ok,
-                exif_miss,
-                full_ok,
-                full_err
-            );
-        }
     }
 
     /// Render the folder view. Returns Some(index) if a tile was clicked.
     pub fn show(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) -> Option<usize> {
+        let frame_start = std::time::Instant::now();
+
         self.poll_enumerator();
         self.poll_thumbnails(ctx);
 
-        // Request repaint while work is pending
+        // Request repaint while work is pending, but throttle to ~60fps
+        // so the UI thread has time to process scroll/input events.
         if !self.enum_done || self.scheduler.has_pending_work() {
-            ctx.request_repaint();
+            ctx.request_repaint_after(std::time::Duration::from_millis(16));
         }
 
         // Show error if enumeration failed
@@ -467,7 +474,8 @@ impl FolderView {
 
         // Status bar at top
         let total = self.scheduler.len();
-        let loaded = self.scheduler.count_in_state(ThumbState::Loaded);
+        let loaded = self.scheduler.loaded_count();
+        let frame_ms = frame_start.elapsed().as_secs_f64() * 1000.0;
         let status = if self.enum_done && loaded == total {
             format!("{} — {} images", self.folder.display(), total)
         } else if self.enum_done {
@@ -480,16 +488,36 @@ impl FolderView {
         } else {
             format!("{} — scanning… ({} found)", self.folder.display(), total)
         };
-        ui.label(
-            egui::RichText::new(status)
-                .color(egui::Color32::from_rgb(180, 180, 180))
-                .size(13.0),
-        );
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new(status)
+                    .color(egui::Color32::from_rgb(180, 180, 180))
+                    .size(13.0),
+            );
+            if debug_mode() {
+                let color = if frame_ms < 8.0 {
+                    egui::Color32::from_rgb(80, 220, 80)
+                } else if frame_ms < 16.0 {
+                    egui::Color32::from_rgb(220, 220, 80)
+                } else {
+                    egui::Color32::from_rgb(220, 80, 80)
+                };
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(
+                        egui::RichText::new(format!("{:.1}ms", frame_ms))
+                            .color(color)
+                            .size(13.0),
+                    );
+                });
+            }
+        });
         ui.add_space(4.0);
 
         let mut clicked_index = None;
 
-        // Scrollable grid
+        // Scrollable grid with row-based rendering.
+        // Only visible rows + a small buffer are rendered — off-screen rows
+        // are skipped with allocate_space, keeping per-frame cost O(visible).
         egui::ScrollArea::vertical()
             .auto_shrink([false; 2])
             .show(ui, |ui| {
@@ -498,6 +526,9 @@ impl FolderView {
                     .floor()
                     .max(1.0) as usize;
 
+                // Row height must be consistent between skip regions and rendered rows.
+                let row_height = CELL_SIZE + TILE_PADDING;
+
                 // Compute scroll position and update scheduler
                 let scroll_offset = ui.clip_rect().min.y - ui.min_rect().min.y;
                 let viewport_height = ui.clip_rect().height();
@@ -505,7 +536,7 @@ impl FolderView {
                     scroll_offset,
                     viewport_height,
                     cols,
-                    CELL_SIZE,
+                    row_height,
                 );
                 if bumped {
                     self.thumb_loader
@@ -515,29 +546,61 @@ impl FolderView {
                 // Get work batch and send to thread pool
                 let batch = self.scheduler.get_work_batch();
                 if !batch.is_empty() {
-                    log::debug!(
-                        "Sending batch: {} items, tier={:?}",
-                        batch.len(),
-                        batch.first().map(|w| w.tier)
-                    );
                     self.thumb_loader.send_batch(batch);
                 }
 
-                // Render tiles
+                // Row-based virtualization
                 let debug = debug_mode();
-                ui.horizontal_wrapped(|ui| {
-                    ui.spacing_mut().item_spacing = egui::vec2(TILE_PADDING, TILE_PADDING);
+                let total_entries = self.scheduler.len();
+                let total_rows = if total_entries > 0 {
+                    total_entries.div_ceil(cols)
+                } else {
+                    0
+                };
 
-                    for idx in 0..self.scheduler.len() {
-                        let entry = self.scheduler.entry(idx);
-                        let texture = &self.textures[idx];
-                        let debug_info = if debug { entry.timings.as_ref() } else { None };
-                        let response = Self::render_tile(ui, &entry.path, texture, debug_info);
-                        if response.clicked() {
-                            clicked_index = Some(idx);
+                let first_visible_row = (scroll_offset / row_height).floor().max(0.0) as usize;
+                let visible_row_count = (viewport_height / row_height).ceil() as usize + 1;
+                let render_first = first_visible_row.saturating_sub(2);
+                let render_last = (first_visible_row + visible_row_count + 2).min(total_rows);
+
+                // Disable egui's automatic vertical spacing — we manage it ourselves
+                ui.spacing_mut().item_spacing.y = 0.0;
+
+                // Skip rows above render zone
+                if render_first > 0 {
+                    ui.allocate_space(egui::vec2(
+                        available_width,
+                        render_first as f32 * row_height,
+                    ));
+                }
+
+                // Render only visible + buffer rows
+                for row in render_first..render_last {
+                    let row_start = row * cols;
+                    let row_end = (row_start + cols).min(total_entries);
+
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing = egui::vec2(TILE_PADDING, 0.0);
+                        for idx in row_start..row_end {
+                            let entry = self.scheduler.entry(idx);
+                            let texture = &self.textures[idx];
+                            let debug_info = if debug { entry.timings.as_ref() } else { None };
+                            let response = Self::render_tile(ui, &entry.path, texture, debug_info);
+                            if response.clicked() {
+                                clicked_index = Some(idx);
+                            }
                         }
-                    }
-                });
+                    });
+                    ui.allocate_space(egui::vec2(0.0, TILE_PADDING));
+                }
+
+                // Skip rows below render zone
+                if render_last < total_rows {
+                    ui.allocate_space(egui::vec2(
+                        available_width,
+                        (total_rows - render_last) as f32 * row_height,
+                    ));
+                }
             });
 
         clicked_index

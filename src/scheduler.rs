@@ -65,6 +65,12 @@ pub struct Scheduler {
     generation: u64,
     /// Last scroll offset used for change detection.
     last_scroll_y: f32,
+    /// Incrementally tracked count of loaded tiles (avoids O(n) scan).
+    loaded_count: usize,
+    /// Incrementally tracked count of tiles still needing work.
+    pending_count: usize,
+    /// Cursor for background scan — avoids O(n) sweep every frame.
+    bg_cursor: usize,
 }
 
 impl Scheduler {
@@ -75,6 +81,9 @@ impl Scheduler {
             cols: 1,
             generation: 0,
             last_scroll_y: 0.0,
+            loaded_count: 0,
+            pending_count: 0,
+            bg_cursor: 0,
         }
     }
 
@@ -87,6 +96,7 @@ impl Scheduler {
             is_exif_quality: false,
             timings: None,
         });
+        self.pending_count += 1;
         idx
     }
 
@@ -109,6 +119,11 @@ impl Scheduler {
     /// Get the current generation counter.
     pub fn generation(&self) -> u64 {
         self.generation
+    }
+
+    /// Number of tiles that have been successfully loaded. O(1).
+    pub fn loaded_count(&self) -> usize {
+        self.loaded_count
     }
 
     /// Update visibility based on scroll position and viewport size.
@@ -236,47 +251,43 @@ impl Scheduler {
                 .collect();
         }
 
-        // Tier 2: Background — off-screen tiles, sorted by distance from center
-        let mut bg_work: Vec<(usize, usize, WorkTier)> = Vec::new();
+        // Tier 2: Background — scan from cursor, wrapping around.
+        // Only scans MAX_BG_SCAN entries per call to stay O(1) amortized.
+        const MAX_BG_SCAN: usize = 64;
+        let mut bg_work: Vec<(usize, WorkTier)> = Vec::new();
+        let n = self.entries.len();
 
-        for idx in 0..self.entries.len() {
-            // Skip near-screen tiles (already handled above)
-            if idx >= near_start && idx < near_end {
-                continue;
+        if n > 0 {
+            // Start scanning outside the near zone
+            if self.bg_cursor >= near_start && self.bg_cursor < near_end {
+                self.bg_cursor = near_end;
             }
-            let distance = if idx > center {
-                idx - center
-            } else {
-                center - idx
-            };
-            match self.entries[idx].state {
-                ThumbState::Pending => {
-                    bg_work.push((idx, distance, WorkTier::ExifOnly));
+            let mut scanned = 0;
+            while scanned < MAX_BG_SCAN && bg_work.len() < Self::MAX_BG_BATCH {
+                if self.bg_cursor >= n {
+                    self.bg_cursor = 0;
                 }
-                ThumbState::ExifFailed => {
-                    bg_work.push((idx, distance, WorkTier::FullDecode));
+                let idx = self.bg_cursor;
+                self.bg_cursor += 1;
+                scanned += 1;
+
+                // Skip near-screen tiles
+                if idx >= near_start && idx < near_end {
+                    continue;
                 }
-                _ => {}
+                match self.entries[idx].state {
+                    ThumbState::Pending => bg_work.push((idx, WorkTier::ExifOnly)),
+                    ThumbState::ExifFailed => bg_work.push((idx, WorkTier::FullDecode)),
+                    _ => {}
+                }
             }
         }
 
         if !bg_work.is_empty() {
-            // Sort: EXIF work before full decode, then by distance
-            bg_work.sort_by_key(|&(_, d, ref tier)| {
-                let tier_priority = match tier {
-                    WorkTier::ExifOnly => 0,
-                    WorkTier::FullDecode => 1,
-                };
-                (tier_priority, d)
-            });
-
-            // Cap to a small batch so on-screen work can preempt next frame
-            bg_work.truncate(Self::MAX_BG_BATCH);
-
             let g = self.generation;
             return bg_work
                 .into_iter()
-                .map(|(idx, _, tier)| {
+                .map(|(idx, tier)| {
                     self.entries[idx].state = match tier {
                         WorkTier::ExifOnly => ThumbState::ExifLoading,
                         WorkTier::FullDecode => ThumbState::FullLoading,
@@ -307,6 +318,10 @@ impl Scheduler {
     /// Merges timings with any existing EXIF timing from the first pass.
     pub fn complete(&mut self, idx: usize, is_exif: bool, timings: DecodeTimings) {
         if idx < self.entries.len() {
+            if self.entries[idx].state != ThumbState::Loaded {
+                self.loaded_count += 1;
+                self.pending_count = self.pending_count.saturating_sub(1);
+            }
             self.entries[idx].state = ThumbState::Loaded;
             self.entries[idx].is_exif_quality = is_exif;
             // Merge: keep EXIF timing from first pass, add full timing from second
@@ -323,6 +338,9 @@ impl Scheduler {
     /// Mark a tile as failed to decode.
     pub fn fail(&mut self, idx: usize) {
         if idx < self.entries.len() {
+            if self.entries[idx].state != ThumbState::Failed {
+                self.pending_count = self.pending_count.saturating_sub(1);
+            }
             self.entries[idx].state = ThumbState::Failed;
         }
     }
@@ -333,22 +351,15 @@ impl Scheduler {
         work_generation < self.generation
     }
 
-    /// Count of tiles in a given state.
+    /// Count of tiles in a given state. O(n) — use sparingly, prefer loaded_count()/has_pending_work().
+    #[cfg(test)]
     pub fn count_in_state(&self, state: ThumbState) -> usize {
         self.entries.iter().filter(|e| e.state == state).count()
     }
 
-    /// Returns true if any tiles are still pending work.
+    /// Returns true if any tiles are still pending work. O(1).
     pub fn has_pending_work(&self) -> bool {
-        self.entries.iter().any(|e| {
-            matches!(
-                e.state,
-                ThumbState::Pending
-                    | ThumbState::ExifLoading
-                    | ThumbState::ExifFailed
-                    | ThumbState::FullLoading
-            )
-        })
+        self.pending_count > 0
     }
 }
 

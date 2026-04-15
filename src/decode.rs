@@ -179,11 +179,7 @@ pub fn try_heif_thumbnail(path: &Path) -> Option<DecodedImage> {
 
     let lib_heif = LibHeif::new();
     let image = lib_heif
-        .decode(
-            &thumb_handle,
-            ColorSpace::Rgb(RgbChroma::Rgba),
-            None,
-        )
+        .decode(&thumb_handle, ColorSpace::Rgb(RgbChroma::Rgba), None)
         .ok()?;
 
     let planes = image.planes();

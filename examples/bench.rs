@@ -10,7 +10,9 @@
 /// The benchmark generates test images on first run and reuses them on subsequent runs.
 /// Delete the benchmark directory to regenerate.
 use image::{ImageFormat, RgbImage, RgbaImage};
-use libheif_rs::{ColorSpace, CompressionFormat, EncoderQuality, HeifContext, Image, LibHeif, RgbChroma, Channel};
+use libheif_rs::{
+    Channel, ColorSpace, CompressionFormat, EncoderQuality, HeifContext, Image, LibHeif, RgbChroma,
+};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -344,8 +346,7 @@ fn create_tiff_with_exif_thumbnail(dir: &Path, src: &RgbImage) {
     // Create a JPEG thumbnail
     let thumb = image::imageops::thumbnail(src, 160, 120);
     let mut thumb_jpeg = Vec::new();
-    let mut thumb_encoder =
-        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut thumb_jpeg, 75);
+    let mut thumb_encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut thumb_jpeg, 75);
     thumb_encoder
         .encode(
             thumb.as_raw(),
