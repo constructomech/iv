@@ -96,6 +96,48 @@
                 "reveal": "always",
                 "clear": true
             }
+        },
+        {
+            "label": "run release",
+            "type": "shell",
+            "command": "${workspaceFolder}/target/release/iv.exe",
+            "args": [
+                "${input:runPath}"
+            ],
+            "dependsOn": "build release",
+            "group": "none",
+            "problemMatcher": [],
+            "presentation": {
+                "reveal": "always"
+            }
+        },
+        {
+            "label": "run release (with logging)",
+            "type": "shell",
+            "command": "${workspaceFolder}/target/release/iv.exe",
+            "args": [
+                "${input:runPath}",
+                "--log"
+            ],
+            "options": {
+                "env": {
+                    "IV_DEBUG": "1"
+                }
+            },
+            "dependsOn": "build release",
+            "group": "none",
+            "problemMatcher": [],
+            "presentation": {
+                "reveal": "always"
+            }
+        }
+    ],
+    "inputs": [
+        {
+            "id": "runPath",
+            "type": "promptString",
+            "description": "Path to an image file or folder",
+            "default": "U:\\photos\\2025\\12"
         }
     ]
 }

@@ -262,7 +262,7 @@ impl GridView {
         }
     }
 
-    fn poll_results(&mut self, ctx: &egui::Context) {
+    fn poll_results(&mut self, ctx: &egui::Context) -> usize {
         let mut processed = 0;
         while processed < MAX_RESULTS_PER_FRAME {
             let result = match self.result_rx.try_recv() {
@@ -337,6 +337,7 @@ impl GridView {
                 }
             }
         }
+        processed
     }
 
     // -- Scheduling ---------------------------------------------------------
@@ -448,7 +449,12 @@ impl GridView {
     // -- Rendering ----------------------------------------------------------
 
     pub fn show(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) -> Option<usize> {
-        self.poll_results(ctx);
+        let frame_start = std::time::Instant::now();
+
+        let poll_start = std::time::Instant::now();
+        let results_processed = self.poll_results(ctx);
+        let results_pending = self.result_rx.len();
+        let poll_ms = poll_start.elapsed().as_secs_f64() * 1000.0;
 
         let config = self.grid.config().clone();
         let tile_w = config.tile_width;
@@ -468,6 +474,7 @@ impl GridView {
 
         let mut clicked = None;
 
+        let sched_render_start = std::time::Instant::now();
         egui::ScrollArea::vertical()
             .auto_shrink([false; 2])
             .show(ui, |ui| {
@@ -524,6 +531,19 @@ impl GridView {
                     ));
                 }
             });
+
+        let render_ms = sched_render_start.elapsed().as_secs_f64() * 1000.0;
+        let frame_ms = frame_start.elapsed().as_secs_f64() * 1000.0;
+
+        // Record frame timing
+        self.grid.record_event(GridEventKind::FrameTiming {
+            frame_ms,
+            poll_ms,
+            schedule_ms: 0.0, // included in render_ms
+            render_ms,
+            results_processed,
+            results_pending,
+        });
 
         // Repaint while visible tiles are pending
         if self.grid.tile_count() > 0 {

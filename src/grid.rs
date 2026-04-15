@@ -132,6 +132,15 @@ pub enum GridEventKind {
     ResultReceived { idx: usize, kind: String, ms: f64 },
     /// Generation bumped (stale work invalidated).
     GenerationBump { generation: u64 },
+    /// Frame timing: how long the UI frame took.
+    FrameTiming {
+        frame_ms: f64,
+        poll_ms: f64,
+        schedule_ms: f64,
+        render_ms: f64,
+        results_processed: usize,
+        results_pending: usize,
+    },
 }
 
 /// The scrollable tile grid.
@@ -221,6 +230,18 @@ impl Grid {
                 }
                 GridEventKind::GenerationBump { generation } => {
                     format!(r#"{{"type":"generation_bump","generation":{generation}}}"#)
+                }
+                GridEventKind::FrameTiming {
+                    frame_ms,
+                    poll_ms,
+                    schedule_ms,
+                    render_ms,
+                    results_processed,
+                    results_pending,
+                } => {
+                    format!(
+                        r#"{{"type":"frame","frame_ms":{frame_ms:.2},"poll_ms":{poll_ms:.2},"schedule_ms":{schedule_ms:.2},"render_ms":{render_ms:.2},"results_processed":{results_processed},"results_pending":{results_pending}}}"#
+                    )
                 }
             };
             out.push_str(&format!(
