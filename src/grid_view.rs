@@ -101,6 +101,8 @@ pub struct GridView {
     generation: Arc<AtomicU64>,
     /// Last scroll position for change detection.
     last_scroll_y: f32,
+    /// Worker thread handles for clean shutdown.
+    workers: Vec<thread::JoinHandle<()>>,
 }
 
 impl GridView {
@@ -114,11 +116,12 @@ impl GridView {
             .map(|n| n.get().saturating_sub(2).max(2))
             .unwrap_or(4);
 
+        let mut workers = Vec::with_capacity(num_workers);
         for _ in 0..num_workers {
             let work_rx = work_rx.clone();
             let result_tx = result_tx.clone();
             let generation = generation.clone();
-            thread::spawn(move || {
+            let handle = thread::spawn(move || {
                 while let Ok(req) = work_rx.recv() {
                     if req.generation < generation.load(Ordering::Relaxed) {
                         continue;
@@ -165,6 +168,7 @@ impl GridView {
                     }
                 }
             });
+            workers.push(handle);
         }
 
         Self {
@@ -177,6 +181,7 @@ impl GridView {
             result_rx,
             generation,
             last_scroll_y: 0.0,
+            workers,
         }
     }
 
@@ -614,5 +619,27 @@ impl GridView {
         }
 
         response
+    }
+}
+
+impl Drop for GridView {
+    fn drop(&mut self) {
+        // Drop channels to signal workers to exit after current work.
+        // work_tx drop causes workers' recv() to return Err.
+        // work_rx drop ensures no lingering channel references.
+        let work_tx = std::mem::replace(
+            &mut self.work_tx,
+            crossbeam_channel::unbounded::<WorkRequest>().0,
+        );
+        drop(work_tx);
+        let work_rx = std::mem::replace(
+            &mut self.work_rx,
+            crossbeam_channel::unbounded::<WorkRequest>().1,
+        );
+        drop(work_rx);
+        // Wait for workers to finish any in-progress decode
+        for handle in self.workers.drain(..) {
+            let _ = handle.join();
+        }
     }
 }
