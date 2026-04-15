@@ -1,0 +1,1 @@
+Before committing any changes, review [ARCHITECTURE.md](ARCHITECTURE.md) and update it if the change affects the Grid data structure, tile state machine, worker threading model, thumbnail extraction pipeline, or rendering approach.
