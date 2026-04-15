@@ -147,12 +147,18 @@ impl DemoApp {
                 enum_done: true,
                 mode: AppMode::Grid,
             },
-            DemoSource::Folder(path) => Self {
-                grid_view: grid_view::GridView::new(grid::Grid::new(grid::GridConfig::default())),
-                enum_handle: Some(enumerator::enumerate_folder(path)),
-                enum_done: false,
-                mode: AppMode::Grid,
-            },
+            DemoSource::Folder(path) => {
+                let mut grid = grid::Grid::new(grid::GridConfig::default());
+                if std::env::var("IV_DEBUG").map_or(false, |v| v == "1") {
+                    grid.enable_logging();
+                }
+                Self {
+                    grid_view: grid_view::GridView::new(grid),
+                    enum_handle: Some(enumerator::enumerate_folder(path)),
+                    enum_done: false,
+                    mode: AppMode::Grid,
+                }
+            }
         }
     }
 

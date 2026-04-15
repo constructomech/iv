@@ -4,6 +4,7 @@
 //! computation. No GPU, no I/O, no egui dependency.
 
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 /// State of a single tile in the grid.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -92,6 +93,44 @@ pub struct VisibleRows {
     pub last: usize,
 }
 
+// ---------------------------------------------------------------------------
+// Activity log
+// ---------------------------------------------------------------------------
+
+/// A single recorded event in the grid's activity log.
+#[derive(Debug, Clone)]
+pub struct GridEvent {
+    /// Microseconds since the grid was created.
+    pub time_us: u64,
+    /// What happened.
+    pub kind: GridEventKind,
+}
+
+/// What kind of event occurred.
+#[derive(Debug, Clone)]
+pub enum GridEventKind {
+    /// Tiles were added (count, first index).
+    TilesAdded { count: usize, first_idx: usize },
+    /// Viewport scrolled to a new position.
+    Scrolled {
+        scroll_y: f32,
+        visible_first: usize,
+        visible_last: usize,
+    },
+    /// Tile state changed.
+    StateChange {
+        idx: usize,
+        from: TileState,
+        to: TileState,
+    },
+    /// Work was scheduled (indices + tier description).
+    WorkScheduled { indices: Vec<usize>, tier: String },
+    /// A result was received from a worker.
+    ResultReceived { idx: usize, kind: String, ms: f64 },
+    /// Generation bumped (stale work invalidated).
+    GenerationBump { generation: u64 },
+}
+
 /// The scrollable tile grid.
 ///
 /// Pure data structure — no I/O, no GPU, fully testable.
@@ -101,6 +140,12 @@ pub struct Grid {
     states: Vec<TileState>,
     names: Vec<String>,
     paths: Vec<PathBuf>,
+    /// Activity log for diagnostics. Only populated when logging is enabled.
+    log: Vec<GridEvent>,
+    /// Whether activity logging is enabled.
+    logging: bool,
+    /// Creation time for relative timestamps.
+    created: Instant,
 }
 
 impl Grid {
@@ -112,7 +157,39 @@ impl Grid {
             states: Vec::new(),
             names: Vec::new(),
             paths: Vec::new(),
+            log: Vec::new(),
+            logging: false,
+            created: Instant::now(),
         }
+    }
+
+    /// Enable activity logging for diagnostics.
+    pub fn enable_logging(&mut self) {
+        self.logging = true;
+    }
+
+    /// Get the activity log.
+    pub fn log(&self) -> &[GridEvent] {
+        &self.log
+    }
+
+    /// Take and clear the activity log.
+    pub fn take_log(&mut self) -> Vec<GridEvent> {
+        std::mem::take(&mut self.log)
+    }
+
+    fn record(&mut self, kind: GridEventKind) {
+        if self.logging {
+            self.log.push(GridEvent {
+                time_us: self.created.elapsed().as_micros() as u64,
+                kind,
+            });
+        }
+    }
+
+    /// Record an external event (e.g., from GridView scheduling).
+    pub fn record_event(&mut self, kind: GridEventKind) {
+        self.record(kind);
     }
 
     // -- Tile management ---------------------------------------------------
@@ -137,6 +214,13 @@ impl Grid {
         self.states.push(TileState::NotLoaded);
         self.names.push(name);
         self.paths.push(path);
+        // Batch-log: record when adding first tile or every 100th tile
+        if idx == 0 || (idx + 1) % 100 == 0 {
+            self.record(GridEventKind::TilesAdded {
+                count: idx + 1,
+                first_idx: 0,
+            });
+        }
         idx
     }
 
@@ -152,6 +236,14 @@ impl Grid {
 
     /// Set the state of a tile.
     pub fn set_tile_state(&mut self, idx: usize, state: TileState) {
+        let from = self.states[idx];
+        if from != state {
+            self.record(GridEventKind::StateChange {
+                idx,
+                from,
+                to: state,
+            });
+        }
         self.states[idx] = state;
     }
 
@@ -232,7 +324,21 @@ impl Grid {
     /// Set the scroll position (clamped to valid range).
     pub fn set_scroll(&mut self, scroll_y: f32) {
         let max_scroll = (self.content_height() - self.viewport.height).max(0.0);
-        self.viewport.scroll_y = scroll_y.clamp(0.0, max_scroll);
+        let new_y = scroll_y.clamp(0.0, max_scroll);
+        let old_y = self.viewport.scroll_y;
+        self.viewport.scroll_y = new_y;
+        // Log significant scroll changes (>1 cell height)
+        if self.logging && (new_y - old_y).abs() > self.config.cell_height() {
+            let vr = self.visible_rows();
+            self.log.push(GridEvent {
+                time_us: self.created.elapsed().as_micros() as u64,
+                kind: GridEventKind::Scrolled {
+                    scroll_y: new_y,
+                    visible_first: vr.first,
+                    visible_last: vr.last,
+                },
+            });
+        }
     }
 
     /// Get the current scroll position.

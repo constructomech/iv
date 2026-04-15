@@ -13,7 +13,7 @@ use std::thread;
 
 use crate::app::DecodedImage;
 use crate::decode;
-use crate::grid::{Grid, GridConfig, TileState};
+use crate::grid::{Grid, GridConfig, GridEventKind, TileState};
 
 /// Returns true if IV_DEBUG env var is set to a truthy value.
 fn debug_mode() -> bool {
@@ -231,6 +231,11 @@ impl GridView {
                             egui::TextureOptions::LINEAR,
                         ));
                         self.timings[idx].embedded_ms = ms;
+                        self.grid.record_event(GridEventKind::ResultReceived {
+                            idx,
+                            kind: "embedded_ok".into(),
+                            ms,
+                        });
                         self.grid.set_tile_state(idx, TileState::Loaded);
                     }
                 }
@@ -238,6 +243,11 @@ impl GridView {
                     if idx < self.grid.tile_count() {
                         self.ensure_vecs(idx);
                         self.timings[idx].embedded_ms = ms;
+                        self.grid.record_event(GridEventKind::ResultReceived {
+                            idx,
+                            kind: "embedded_miss".into(),
+                            ms,
+                        });
                         self.grid.set_tile_state(idx, TileState::CreatingThumbnail);
                     }
                 }
@@ -252,13 +262,22 @@ impl GridView {
                             egui::TextureOptions::LINEAR,
                         ));
                         self.timings[idx].full_ms = ms;
+                        self.grid.record_event(GridEventKind::ResultReceived {
+                            idx,
+                            kind: "full_ok".into(),
+                            ms,
+                        });
                         self.grid.set_tile_state(idx, TileState::Loaded);
                     }
                 }
                 WorkResult::Failed { idx } => {
                     if idx < self.grid.tile_count() {
                         self.ensure_vecs(idx);
-                        // Leave as-is — don't retry
+                        self.grid.record_event(GridEventKind::ResultReceived {
+                            idx,
+                            kind: "failed".into(),
+                            ms: 0.0,
+                        });
                     }
                 }
             }
@@ -276,6 +295,7 @@ impl GridView {
         // Phase 1: embedded thumbnails for NotLoaded tiles (highest priority)
         let not_loaded = self.grid.visible_in_state(TileState::NotLoaded);
         if !not_loaded.is_empty() {
+            let mut scheduled_indices = Vec::new();
             let mut scheduled = 0;
             for idx in not_loaded {
                 if scheduled >= MAX_SCHEDULE_PER_FRAME {
@@ -292,13 +312,21 @@ impl GridView {
                     generation: current_gen,
                     tier: WorkTier::EmbeddedOnly,
                 });
+                scheduled_indices.push(idx);
                 scheduled += 1;
             }
-            return; // Don't send full-decode work until all embedded are done
+            if !scheduled_indices.is_empty() {
+                self.grid.record_event(GridEventKind::WorkScheduled {
+                    indices: scheduled_indices,
+                    tier: "embedded".into(),
+                });
+            }
+            return;
         }
 
         // Phase 2: full decode for tiles where embedded failed
         let needs_full = self.grid.visible_in_state(TileState::CreatingThumbnail);
+        let mut scheduled_indices = Vec::new();
         let mut scheduled = 0;
         for idx in needs_full {
             if scheduled >= MAX_SCHEDULE_PER_FRAME {
@@ -308,14 +336,20 @@ impl GridView {
             if path.as_os_str().is_empty() {
                 continue;
             }
-            // Reuse CreatingThumbnail state — it means "full decode in progress"
             let _ = self.work_tx.send(WorkRequest {
                 idx,
                 path,
                 generation: current_gen,
                 tier: WorkTier::FullDecode,
             });
+            scheduled_indices.push(idx);
             scheduled += 1;
+        }
+        if !scheduled_indices.is_empty() {
+            self.grid.record_event(GridEventKind::WorkScheduled {
+                indices: scheduled_indices,
+                tier: "full_decode".into(),
+            });
         }
     }
 
@@ -326,16 +360,22 @@ impl GridView {
         let cell_h = self.grid.config().cell_height();
         if (scroll - self.last_scroll_y).abs() > cell_h * 2.0 {
             self.last_scroll_y = scroll;
-            self.generation.fetch_add(1, Ordering::Relaxed);
+            let new_gen = self.generation.fetch_add(1, Ordering::Relaxed) + 1;
             while self.work_rx.try_recv().is_ok() {}
+            let mut reset_count = 0;
             for idx in 0..self.grid.tile_count() {
                 match self.grid.tile_state(idx) {
                     TileState::LoadingEmbedded | TileState::CreatingThumbnail => {
                         self.grid.set_tile_state(idx, TileState::NotLoaded);
+                        reset_count += 1;
                     }
                     _ => {}
                 }
             }
+            self.grid.record_event(GridEventKind::GenerationBump {
+                generation: new_gen,
+            });
+            let _ = reset_count;
         }
     }
 
