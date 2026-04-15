@@ -192,10 +192,12 @@ impl GridView {
                         }
                         WorkTier::FullDecode => {
                             let start = std::time::Instant::now();
+                            let is_heif = decode::is_heif_extension(&req.path);
                             // Use cached data if available, otherwise read
                             let data = req.data.or_else(|| std::fs::read(&req.path).ok());
-                            let result =
-                                data.and_then(|d| decode::decode_from_bytes(&d, THUMB_SIZE).ok());
+                            let result = data.and_then(|d| {
+                                decode::decode_from_bytes(&d, THUMB_SIZE, is_heif).ok()
+                            });
                             let ms = start.elapsed().as_secs_f64() * 1000.0;
                             match result {
                                 Some((image, _)) => {
@@ -466,18 +468,9 @@ impl GridView {
         let cell_h = config.cell_height();
         let available_width = ui.available_width();
 
-        // Status bar
-        let total = self.grid.tile_count();
-        ui.label(
-            egui::RichText::new(rust_i18n::t!("status.item_count", count = total))
-                .color(egui::Color32::from_rgb(180, 180, 180))
-                .size(13.0),
-        );
-        ui.add_space(4.0);
-
-        // Reserve space at the bottom for the tile size slider
-        let slider_height = 24.0;
-        let available_for_grid = ui.available_height() - slider_height - 4.0;
+        // Reserve space at the bottom for the status bar
+        let bar_height = 24.0;
+        let available_for_grid = ui.available_height() - bar_height - 4.0;
 
         let mut clicked = None;
 
@@ -540,10 +533,17 @@ impl GridView {
                 }
             });
 
-        // Tile size slider at bottom
+        // Status bar at bottom: item count + tile size slider
         ui.add_space(4.0);
+        let total = self.grid.tile_count();
         ui.horizontal(|ui| {
-            ui.spacing_mut().slider_width = ui.available_width() - 80.0;
+            ui.label(
+                egui::RichText::new(rust_i18n::t!("status.item_count", count = total))
+                    .color(egui::Color32::from_rgb(160, 160, 160))
+                    .size(12.0),
+            );
+            ui.add_space(16.0);
+            ui.spacing_mut().slider_width = 120.0;
             if ui
                 .add(egui::Slider::new(&mut self.tile_size, 60.0..=400.0).show_value(false))
                 .changed()
@@ -552,7 +552,7 @@ impl GridView {
             }
             ui.label(
                 egui::RichText::new(format!("{}px", self.tile_size as u32))
-                    .color(egui::Color32::from_rgb(140, 140, 140))
+                    .color(egui::Color32::from_rgb(120, 120, 120))
                     .size(11.0),
             );
         });

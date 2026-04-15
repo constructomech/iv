@@ -106,9 +106,13 @@ pub fn decode_full_thumbnail(
 
     let data =
         std::fs::read(path).map_err(|e| format!("Failed to read {}: {e}", path.display()))?;
-    let orientation = read_exif_orientation(&data);
     let img = image::load_from_memory(&data).map_err(|e| format!("Failed to decode: {e}"))?;
-    let img = apply_orientation(img, orientation);
+    let img = if !is_heif_extension(path) {
+        let orientation = read_exif_orientation(&data);
+        apply_orientation(img, orientation)
+    } else {
+        img
+    };
     let thumb = img.thumbnail(max_size, max_size);
     let rgba = thumb.to_rgba8();
 
@@ -125,17 +129,24 @@ pub fn decode_full_thumbnail(
 }
 
 /// Decode a thumbnail from already-loaded file bytes (I/O already done).
-/// Applies EXIF orientation. Used by the I/O-separated worker pipeline.
+/// Applies EXIF orientation for non-HEIF formats. For HEIF, libheif
+/// applies orientation internally during decode.
+/// `skip_orientation`: set true for HEIC/HEIF files.
 pub fn decode_from_bytes(
     data: &[u8],
     max_size: u32,
+    skip_orientation: bool,
 ) -> Result<(DecodedImage, DecodeTimings), String> {
     let mut timings = DecodeTimings::default();
     let start = std::time::Instant::now();
 
-    let orientation = read_exif_orientation(data);
     let img = image::load_from_memory(data).map_err(|e| format!("Failed to decode: {e}"))?;
-    let img = apply_orientation(img, orientation);
+    let img = if !skip_orientation {
+        let orientation = read_exif_orientation(data);
+        apply_orientation(img, orientation)
+    } else {
+        img
+    };
     let thumb = img.thumbnail(max_size, max_size);
     let rgba = thumb.to_rgba8();
 

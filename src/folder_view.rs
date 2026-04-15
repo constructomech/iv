@@ -252,7 +252,8 @@ impl ThumbLoader {
                             // CPU phase: decode + downscale (no I/O permit held)
                             match data {
                                 Ok(data) => {
-                                    match decode::decode_from_bytes(&data, THUMB_DECODE_SIZE) {
+                                    match decode::decode_from_bytes(&data, THUMB_DECODE_SIZE, false)
+                                    {
                                         Ok((image, timings)) => ThumbResult::FullOk {
                                             idx: work.idx,
                                             image,

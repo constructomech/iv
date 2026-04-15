@@ -20,13 +20,20 @@ pub struct DecodedImage {
 }
 
 /// Load an image file from disk and decode it to RGBA, applying EXIF orientation.
+/// For HEIC/HEIF, libheif applies orientation internally, so we skip it.
 pub fn load_image(path: &Path) -> Result<DecodedImage, String> {
     let data =
         std::fs::read(path).map_err(|e| format!("Failed to read {}: {e}", path.display()))?;
-    let orientation = crate::decode::read_exif_orientation(&data);
     let img = image::load_from_memory(&data)
         .map_err(|e| format!("Failed to decode {}: {e}", path.display()))?;
-    let img = crate::decode::apply_orientation(img, orientation);
+    // libheif applies orientation during decode for HEIC/HEIF,
+    // so only apply manual orientation for other formats.
+    let img = if !crate::decode::is_heif_extension(path) {
+        let orientation = crate::decode::read_exif_orientation(&data);
+        crate::decode::apply_orientation(img, orientation)
+    } else {
+        img
+    };
     let rgba = img.to_rgba8();
     Ok(DecodedImage {
         width: rgba.width(),
