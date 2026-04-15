@@ -33,3 +33,5 @@ x86_64-pc-windows-msvc = { triplet = "x64-windows-static-md" }
 [profile.release]
 opt-level = 3
 lto = "thin"
+strip = true
+codegen-units = 1
