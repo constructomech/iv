@@ -32,28 +32,13 @@
             }
         },
         {
-            "name": "Demo 10k tiles (release)",
+            "name": "Release with logging",
             "type": "lldb",
             "request": "launch",
             "program": "${workspaceFolder}/target/release/iv",
             "args": [
-                "--demo",
-                "10000"
-            ],
-            "cwd": "${workspaceFolder}",
-            "preLaunchTask": "build release",
-            "env": {
-                "IV_DEBUG": "1"
-            }
-        },
-        {
-            "name": "Demo folder (release)",
-            "type": "lldb",
-            "request": "launch",
-            "program": "${workspaceFolder}/target/release/iv",
-            "args": [
-                "--demo",
-                "${input:imagePath}"
+                "${input:imagePath}",
+                "--log"
             ],
             "cwd": "${workspaceFolder}",
             "preLaunchTask": "build release",
