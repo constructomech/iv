@@ -156,12 +156,7 @@ impl DemoApp {
             loop {
                 match handle.receiver.try_recv() {
                     Ok(enumerator::EnumMessage::Found(path)) => {
-                        let name = path
-                            .file_name()
-                            .unwrap_or_default()
-                            .to_string_lossy()
-                            .into_owned();
-                        self.grid_view.grid_mut().add_tile(name);
+                        self.grid_view.grid_mut().add_tile_with_path(path);
                     }
                     Ok(enumerator::EnumMessage::Done(_)) => {
                         self.enum_done = true;

@@ -3,6 +3,8 @@
 //! Owns layout math, viewport tracking, tile state, and visible-range
 //! computation. No GPU, no I/O, no egui dependency.
 
+use std::path::{Path, PathBuf};
+
 /// State of a single tile in the grid.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TileState {
@@ -98,6 +100,7 @@ pub struct Grid {
     viewport: Viewport,
     states: Vec<TileState>,
     names: Vec<String>,
+    paths: Vec<PathBuf>,
 }
 
 impl Grid {
@@ -108,6 +111,7 @@ impl Grid {
             viewport: Viewport::default(),
             states: Vec::new(),
             names: Vec::new(),
+            paths: Vec::new(),
         }
     }
 
@@ -118,6 +122,21 @@ impl Grid {
         let idx = self.states.len();
         self.states.push(TileState::NotLoaded);
         self.names.push(name.into());
+        self.paths.push(PathBuf::new());
+        idx
+    }
+
+    /// Add a tile with a full file path. Name is extracted from the path.
+    pub fn add_tile_with_path(&mut self, path: PathBuf) -> usize {
+        let idx = self.states.len();
+        let name = path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned();
+        self.states.push(TileState::NotLoaded);
+        self.names.push(name);
+        self.paths.push(path);
         idx
     }
 
@@ -139,6 +158,20 @@ impl Grid {
     /// Get the name of a tile.
     pub fn tile_name(&self, idx: usize) -> &str {
         &self.names[idx]
+    }
+
+    /// Get the file path of a tile.
+    pub fn tile_path(&self, idx: usize) -> &Path {
+        &self.paths[idx]
+    }
+
+    /// Get visible tile indices that are in the given state.
+    /// O(visible) — only scans visible tiles.
+    pub fn visible_in_state(&self, state: TileState) -> Vec<usize> {
+        let (start, end) = self.visible_tile_range();
+        (start..end)
+            .filter(|&idx| self.states[idx] == state)
+            .collect()
     }
 
     // -- Layout ------------------------------------------------------------
