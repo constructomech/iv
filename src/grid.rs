@@ -284,6 +284,11 @@ impl Grid {
     pub fn viewport(&self) -> &Viewport {
         &self.viewport
     }
+
+    /// Get all file paths (for image view navigation).
+    pub fn all_paths(&self) -> &[PathBuf] {
+        &self.paths
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -74,7 +74,7 @@ fn main() {
         Some(p) => PathBuf::from(p),
         None => {
             eprintln!("Usage: iv <image-or-folder-path>");
-            eprintln!("       iv --demo [count]");
+            eprintln!("       iv --demo [count | path]");
             process::exit(1);
         }
     };
@@ -85,17 +85,10 @@ fn main() {
     }
 
     let is_folder = path.is_dir();
-    let title = if is_folder {
-        format!(
-            "iv — {}",
-            path.file_name().unwrap_or_default().to_string_lossy()
-        )
-    } else {
-        format!(
-            "iv — {}",
-            path.file_name().unwrap_or_default().to_string_lossy()
-        )
-    };
+    let title = format!(
+        "iv — {}",
+        path.file_name().unwrap_or_default().to_string_lossy()
+    );
 
     let native_options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
@@ -107,17 +100,26 @@ fn main() {
     if let Err(e) = eframe::run_native(
         "iv",
         native_options,
-        Box::new(move |cc| {
+        Box::new(move |_cc| {
             if is_folder {
-                Ok(Box::new(app::App::new_folder(cc, path)))
+                Ok(Box::new(DemoApp::new(DemoSource::Folder(path))))
             } else {
-                Ok(Box::new(app::App::new_image(cc, path)))
+                // Single image: use the old app for now
+                Ok(Box::new(app::App::new_image(_cc, path)))
             }
         }),
     ) {
         eprintln!("Error running iv: {e}");
         process::exit(1);
     }
+}
+
+/// What the app is viewing.
+enum AppMode {
+    /// Grid/folder view.
+    Grid,
+    /// Full-resolution image view.
+    Image(image_view::ImageView),
 }
 
 /// What the demo app is showing.
@@ -128,11 +130,12 @@ enum DemoSource {
     Folder(PathBuf),
 }
 
-/// Minimal app that shows a grid of tiles — either synthetic or from a folder.
+/// App that shows a grid of tiles with image view support.
 struct DemoApp {
     grid_view: grid_view::GridView,
     enum_handle: Option<enumerator::EnumHandle>,
     enum_done: bool,
+    mode: AppMode,
 }
 
 impl DemoApp {
@@ -142,11 +145,13 @@ impl DemoApp {
                 grid_view: grid_view::GridView::new_demo(count),
                 enum_handle: None,
                 enum_done: true,
+                mode: AppMode::Grid,
             },
             DemoSource::Folder(path) => Self {
                 grid_view: grid_view::GridView::new(grid::Grid::new(grid::GridConfig::default())),
                 enum_handle: Some(enumerator::enumerate_folder(path)),
                 enum_done: false,
+                mode: AppMode::Grid,
             },
         }
     }
@@ -185,7 +190,6 @@ impl eframe::App for DemoApp {
     fn update(&mut self, ctx: &eframe::egui::Context, _frame: &mut eframe::Frame) {
         self.poll_enumerator();
 
-        // Keep repainting while enumeration is in progress
         if !self.enum_done {
             ctx.request_repaint_after(std::time::Duration::from_millis(16));
         }
@@ -196,8 +200,22 @@ impl eframe::App for DemoApp {
                     .fill(eframe::egui::Color32::from_rgb(30, 30, 30))
                     .inner_margin(8.0),
             )
-            .show(ctx, |ui| {
-                self.grid_view.show(ctx, ui);
+            .show(ctx, |ui| match &mut self.mode {
+                AppMode::Grid => {
+                    if let Some(clicked_idx) = self.grid_view.show(ctx, ui) {
+                        let paths: Vec<PathBuf> = self.grid_view.grid().all_paths().to_vec();
+                        if !paths.is_empty() && clicked_idx < paths.len() {
+                            self.mode =
+                                AppMode::Image(image_view::ImageView::new(paths, clicked_idx));
+                        }
+                    }
+                }
+                AppMode::Image(view) => {
+                    let go_back = view.show(ctx, ui);
+                    if go_back {
+                        self.mode = AppMode::Grid;
+                    }
+                }
             });
     }
 }
