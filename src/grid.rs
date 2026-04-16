@@ -296,7 +296,7 @@ impl Grid {
         self.names.push(name);
         self.paths.push(path);
         // Batch-log: record when adding first tile or every 100th tile
-        if idx == 0 || (idx + 1) % 100 == 0 {
+        if idx == 0 || (idx + 1).is_multiple_of(100) {
             self.record(GridEventKind::TilesAdded {
                 count: idx + 1,
                 first_idx: 0,
@@ -817,7 +817,7 @@ mod tests {
             assert!(vr.first <= vr.last);
             assert!(vr.last <= g.total_rows());
 
-            let (start, end) = g.visible_tile_range();
+            let (_start, end) = g.visible_tile_range();
             assert!(end <= g.tile_count());
 
             // Verify visible tiles are valid indices

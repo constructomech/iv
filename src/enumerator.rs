@@ -152,13 +152,12 @@ mod tests {
         let handle = enumerate_folder(dir.clone());
         let mut got_done = false;
 
-        for msg in handle.receiver {
+        if let Some(msg) = handle.receiver.into_iter().next() {
             match msg {
                 EnumMessage::Found(_) => panic!("should find nothing"),
                 EnumMessage::Done(c) => {
                     assert_eq!(c, 0);
                     got_done = true;
-                    break;
                 }
                 EnumMessage::Error(e) => panic!("unexpected error: {e}"),
             }
@@ -174,12 +173,9 @@ mod tests {
         let mut got_error = false;
 
         for msg in handle.receiver {
-            match msg {
-                EnumMessage::Error(_) => {
-                    got_error = true;
-                    break;
-                }
-                _ => {}
+            if let EnumMessage::Error(_) = msg {
+                got_error = true;
+                break;
             }
         }
 

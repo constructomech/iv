@@ -1,0 +1,28 @@
+iv-thumb
+Copyright (C) 2026 Michael
+
+This program is free software; you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation; either version 2 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License along
+with this program; if not, see <https://www.gnu.org/licenses/old-licenses/gpl-2.0.html>.
+
+-------------------------------------------------------------------------------
+
+NOTE ON LICENSE SCOPE
+
+Only the `iv-thumb` binary (this crate) is distributed under GPL-2.0-or-later.
+The main `iv` image viewer (the parent crate) remains MIT-licensed and is
+distributed independently. See ../LICENSE for the MIT terms covering `iv`.
+
+The GPL obligation applies to `iv-thumb` because it statically links x265
+(GPL-2.0-or-later) via libheif in order to encode HEVC thumbnails natively
+(matching iPhone/camera-produced HEIC files). Building `iv-thumb` therefore
+requires `libheif[core,aom,x265]` in vcpkg; see Cargo.toml.

@@ -1,6 +1,5 @@
 /// Quick diagnostic: check EXIF thumbnail extraction on real files.
 /// Run with: cargo run --example exif_diag -- <file1> <file2> ...
-
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.is_empty() {

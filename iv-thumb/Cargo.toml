@@ -1,0 +1,23 @@
+[package]
+name = "iv-thumb"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-2.0-or-later"
+description = "Losslessly embed HEVC/JPEG thumbnails into image files. Links x265 (GPL)."
+
+[[bin]]
+name = "iv-thumb"
+path = "src/main.rs"
+
+[dependencies]
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
+kamadak-exif = "0.6"
+libheif-rs = { version = "2.7", default-features = false, features = ["image", "v1_17"] }
+
+[package.metadata.vcpkg]
+git = "https://github.com/microsoft/vcpkg"
+rev = "2026.01.16"
+install = ["libheif[core,aom,hevc]"]
+
+[package.metadata.vcpkg.target]
+x86_64-pc-windows-msvc = { triplet = "x64-windows-static-md" }

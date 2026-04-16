@@ -23,14 +23,12 @@ const EXIF_READ_SIZE: usize = 256 * 1024;
 pub fn read_exif_orientation(data: &[u8]) -> u32 {
     let cursor = Cursor::new(data);
     let exif_reader = exif::Reader::new();
-    if let Ok(exif) = exif_reader.read_from_container(&mut std::io::BufReader::new(cursor)) {
-        if let Some(field) = exif.get_field(exif::Tag::Orientation, exif::In::PRIMARY) {
-            if let Some(v) = field.value.get_uint(0) {
-                if (1..=8).contains(&v) {
-                    return v;
-                }
-            }
-        }
+    if let Ok(exif) = exif_reader.read_from_container(&mut std::io::BufReader::new(cursor))
+        && let Some(field) = exif.get_field(exif::Tag::Orientation, exif::In::PRIMARY)
+        && let Some(v) = field.value.get_uint(0)
+        && (1..=8).contains(&v)
+    {
+        return v;
     }
     1
 }
@@ -276,18 +274,17 @@ pub fn extract_exif_thumbnail(data: &[u8]) -> Option<DecodedImage> {
         .ok()?;
 
     for field in exif.fields() {
-        if field.tag == exif::Tag::JPEGInterchangeFormat {
-            if let (Some(offset_field), Some(length_field)) = (
+        if field.tag == exif::Tag::JPEGInterchangeFormat
+            && let (Some(offset_field), Some(length_field)) = (
                 exif.get_field(exif::Tag::JPEGInterchangeFormat, field.ifd_num),
                 exif.get_field(exif::Tag::JPEGInterchangeFormatLength, field.ifd_num),
-            ) {
-                if let (Some(offset), Some(length)) = (
-                    offset_field.value.get_uint(0),
-                    length_field.value.get_uint(0),
-                ) {
-                    return find_and_decode_exif_jpeg(data, offset, length);
-                }
-            }
+            )
+            && let (Some(offset), Some(length)) = (
+                offset_field.value.get_uint(0),
+                length_field.value.get_uint(0),
+            )
+        {
+            return find_and_decode_exif_jpeg(data, offset, length);
         }
     }
 

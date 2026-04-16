@@ -1,7 +1,20 @@
+[workspace]
+# iv-thumb is deliberately NOT a workspace member: it links GPL-licensed x265
+# (via libheif[core,aom,x265]) and must build with its own vcpkg tree so that
+# the MIT-licensed `iv` binary is never statically linked against x265.
+# See iv-thumb/LICENSE for details. Build iv-thumb with:
+#   cargo build --manifest-path iv-thumb/Cargo.toml
+exclude = ["iv-thumb"]
+
 [package]
 name = "iv"
 version = "0.1.0"
 edition = "2024"
+license = "MIT"
+
+[[bin]]
+name = "iv"
+path = "src/main.rs"
 
 [dependencies]
 eframe = "0.31"

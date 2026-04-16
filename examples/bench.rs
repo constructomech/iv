@@ -611,13 +611,13 @@ fn bench_full_decode(path: &Path, thumb_size: u32) -> (f64, String) {
     (median(&mut times), pixel_info)
 }
 
-fn median(data: &mut Vec<f64>) -> f64 {
+fn median(data: &mut [f64]) -> f64 {
     data.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     if data.is_empty() {
         return 0.0;
     }
     let mid = data.len() / 2;
-    if data.len() % 2 == 0 {
+    if data.len().is_multiple_of(2) {
         (data[mid - 1] + data[mid]) / 2.0
     } else {
         data[mid]

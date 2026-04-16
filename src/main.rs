@@ -28,7 +28,7 @@ fn main() {
         .iter()
         .skip(1)
         .find(|a| !a.starts_with("--"))
-        .map(|p| PathBuf::from(p));
+        .map(PathBuf::from);
 
     let path = match path {
         Some(p) => p,

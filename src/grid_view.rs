@@ -17,7 +17,7 @@ use crate::grid::{Grid, GridConfig, GridEventKind, TileState};
 
 /// Returns true if IV_DEBUG env var is set to a truthy value.
 fn debug_mode() -> bool {
-    std::env::var("IV_DEBUG").map_or(false, |v| v == "1" || v.eq_ignore_ascii_case("true"))
+    std::env::var("IV_DEBUG").is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
 }
 
 /// Maximum tiles to schedule per frame.
@@ -607,6 +607,7 @@ impl GridView {
     }
 
     /// Render a single tile.
+    #[allow(clippy::too_many_arguments)]
     fn render_tile(
         ui: &mut egui::Ui,
         idx: usize,
