@@ -47,8 +47,8 @@ pub struct GridConfig {
 impl Default for GridConfig {
     fn default() -> Self {
         Self {
-            tile_width: 160.0,
-            tile_height: 160.0,
+            tile_width: 275.0,
+            tile_height: 275.0,
             padding: 8.0,
         }
     }
@@ -497,7 +497,13 @@ mod tests {
     use super::*;
 
     fn make_grid(tile_count: usize) -> Grid {
-        let mut g = Grid::new(GridConfig::default());
+        // Use fixed 160px tiles for test stability (independent of app default)
+        let config = GridConfig {
+            tile_width: 160.0,
+            tile_height: 160.0,
+            padding: 8.0,
+        };
+        let mut g = Grid::new(config);
         g.set_viewport_size(1200.0, 800.0);
         for i in 0..tile_count {
             g.add_tile(format!("img_{i:05}.jpg"));
@@ -509,7 +515,12 @@ mod tests {
 
     #[test]
     fn cols_from_viewport_width() {
-        let mut g = Grid::new(GridConfig::default());
+        let config = GridConfig {
+            tile_width: 160.0,
+            tile_height: 160.0,
+            padding: 8.0,
+        };
+        let mut g = Grid::new(config);
         // cell_width = 160 + 8 = 168
         // (1200 + 8) / 168 = 7.19 → 7 cols
         g.set_viewport_size(1200.0, 800.0);
@@ -687,7 +698,12 @@ mod tests {
 
     #[test]
     fn grid_grows_dynamically() {
-        let mut g = Grid::new(GridConfig::default());
+        let config = GridConfig {
+            tile_width: 160.0,
+            tile_height: 160.0,
+            padding: 8.0,
+        };
+        let mut g = Grid::new(config);
         g.set_viewport_size(1200.0, 800.0);
 
         assert_eq!(g.tile_count(), 0);

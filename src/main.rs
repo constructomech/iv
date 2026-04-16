@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use rust_i18n::t;
 use std::env;
 use std::path::PathBuf;
@@ -8,11 +10,9 @@ rust_i18n::i18n!("locales", fallback = "en");
 mod app;
 mod decode;
 mod enumerator;
-mod folder_view;
 mod grid;
 mod grid_view;
 mod image_view;
-mod scheduler;
 
 fn main() {
     env_logger::init();

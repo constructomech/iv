@@ -6,11 +6,9 @@ rust_i18n::i18n!("locales", fallback = "en");
 mod app;
 mod decode;
 mod enumerator;
-mod folder_view;
 pub mod grid;
 mod grid_view;
 mod image_view;
-mod scheduler;
 
 pub use app::DecodedImage;
 pub use decode::{
@@ -19,7 +17,7 @@ pub use decode::{
     try_heif_thumbnail_from_bytes,
 };
 pub use enumerator::{EnumHandle, EnumMessage, enumerate_folder};
-pub use scheduler::{EntryState, Scheduler, ThumbState, WorkItem, WorkTier};
+pub use grid::{Grid, GridConfig, GridEvent, GridEventKind, TileState, VisibleRows};
 
 /// Register HEIF/HEIC decoder hooks so the `image` crate can decode these formats.
 /// Call once at startup before decoding any HEIC files.

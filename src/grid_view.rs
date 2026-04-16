@@ -454,6 +454,18 @@ impl GridView {
     // -- Rendering ----------------------------------------------------------
 
     pub fn show(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) -> Option<usize> {
+        // Suppress egui's default solid white selection/focus rectangles
+        let mut style = (*ctx.style()).clone();
+        style.visuals.widgets.active.bg_fill = egui::Color32::TRANSPARENT;
+        style.visuals.widgets.active.weak_bg_fill = egui::Color32::TRANSPARENT;
+        style.visuals.widgets.active.bg_stroke = egui::Stroke::NONE;
+        style.visuals.widgets.hovered.bg_fill = egui::Color32::TRANSPARENT;
+        style.visuals.widgets.hovered.weak_bg_fill = egui::Color32::TRANSPARENT;
+        style.visuals.widgets.hovered.bg_stroke = egui::Stroke::NONE;
+        style.visuals.selection.bg_fill = egui::Color32::TRANSPARENT;
+        style.visuals.selection.stroke = egui::Stroke::NONE;
+        ctx.set_style(style);
+
         let frame_start = std::time::Instant::now();
 
         let poll_start = std::time::Instant::now();
@@ -533,16 +545,10 @@ impl GridView {
                 }
             });
 
-        // Status bar at bottom: item count + tile size slider
+        // Status bar at bottom: tile size slider (left) + item count (right)
         ui.add_space(4.0);
         let total = self.grid.tile_count();
         ui.horizontal(|ui| {
-            ui.label(
-                egui::RichText::new(rust_i18n::t!("status.item_count", count = total))
-                    .color(egui::Color32::from_rgb(160, 160, 160))
-                    .size(12.0),
-            );
-            ui.add_space(16.0);
             ui.spacing_mut().slider_width = 120.0;
             if ui
                 .add(egui::Slider::new(&mut self.tile_size, 60.0..=400.0).show_value(false))
@@ -555,6 +561,13 @@ impl GridView {
                     .color(egui::Color32::from_rgb(120, 120, 120))
                     .size(11.0),
             );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.label(
+                    egui::RichText::new(rust_i18n::t!("status.item_count", count = total))
+                        .color(egui::Color32::from_rgb(160, 160, 160))
+                        .size(12.0),
+                );
+            });
         });
 
         let render_ms = sched_render_start.elapsed().as_secs_f64() * 1000.0;
@@ -605,8 +618,8 @@ impl GridView {
         tile_h: f32,
         debug: bool,
     ) -> egui::Response {
-        let (rect, response) =
-            ui.allocate_exact_size(egui::vec2(tile_w, tile_h), egui::Sense::click());
+        let desired_size = egui::vec2(tile_w, tile_h);
+        let (rect, response) = ui.allocate_exact_size(desired_size, egui::Sense::click());
 
         if ui.is_rect_visible(rect) {
             let painter = ui.painter_at(rect);
@@ -643,12 +656,17 @@ impl GridView {
                 painter.rect_filled(rect, 2.0, bg);
             }
 
-            // Hover
-            if response.hovered() {
+            // Hover/click highlight — subtle alpha brightening
+            if response.hovered() || response.is_pointer_button_down_on() {
+                let alpha = if response.is_pointer_button_down_on() {
+                    50
+                } else {
+                    30
+                };
                 painter.rect_filled(
                     rect,
                     2.0,
-                    egui::Color32::from_rgba_premultiplied(255, 255, 255, 20),
+                    egui::Color32::from_rgba_premultiplied(255, 255, 255, alpha),
                 );
             }
 
