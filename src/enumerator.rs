@@ -56,8 +56,9 @@ fn enumerate_inner(folder: &Path, tx: &mpsc::Sender<EnumMessage>) {
 
         let path = entry.path();
 
-        // Skip directories and non-image files
-        if path.is_file() && is_image_file(&path) {
+        // Use file_type() from the directory entry (no extra stat syscall)
+        let is_file = entry.file_type().is_ok_and(|ft| ft.is_file());
+        if is_file && is_image_file(&path) {
             count += 1;
             if tx.send(EnumMessage::Found(path)).is_err() {
                 return; // Receiver dropped, app is shutting down
