@@ -93,6 +93,27 @@ pub fn try_exif_only(path: &Path) -> (Option<DecodedImage>, DecodeTimings) {
     (result, timings)
 }
 
+/// Try EXIF thumbnail extraction from already-loaded bytes (no I/O).
+/// For non-HEIC data, parses EXIF and applies orientation.
+/// For HEIC data, use `try_heif_thumbnail_from_bytes` directly.
+pub fn try_embedded_from_bytes(data: &[u8]) -> Option<DecodedImage> {
+    let orientation = read_exif_orientation(data);
+    let mut decoded = extract_exif_thumbnail(data)?;
+
+    if orientation != 1 {
+        let img = image::RgbaImage::from_raw(decoded.width, decoded.height, decoded.pixels)?;
+        let oriented = apply_orientation(image::DynamicImage::ImageRgba8(img), orientation);
+        let rgba = oriented.to_rgba8();
+        decoded = DecodedImage {
+            width: rgba.width(),
+            height: rgba.height(),
+            pixels: rgba.into_raw(),
+        };
+    }
+
+    Some(decoded)
+}
+
 /// Tier 1: Full image decode + downscale to thumbnail.
 /// Reads the entire file. Only call after EXIF has been tried and failed.
 pub fn decode_full_thumbnail(

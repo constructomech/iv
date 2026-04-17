@@ -4,6 +4,11 @@
 //! Two-phase loading: all visible embedded thumbnails are extracted first
 //! (fast, ~1-10ms each). Only after all visible tiles have something to
 //! show does full decode begin for tiles that had no embedded thumbnail.
+//!
+//! Pipeline architecture:
+//!   I/O pool (tokio, auto-scaled blocking threads) → Decode pool (cores-2 threads)
+//!   The I/O pool reads bytes from disk; the decode pool does CPU-bound work.
+//!   This keeps decode threads saturated while I/O is in flight.
 
 use eframe::egui;
 use std::path::PathBuf;
@@ -20,12 +25,11 @@ fn debug_mode() -> bool {
     std::env::var("IV_DEBUG").is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
 }
 
-/// Maximum tiles to schedule per frame.
-const MAX_SCHEDULE_PER_FRAME: usize = 12;
+/// Per-frame time budget for scheduling + result polling (ms).
+/// Keeps the UI thread responsive at 60fps (~16ms frame budget).
+const FRAME_WORK_BUDGET_MS: f64 = 4.0;
 /// Thumbnail decode resolution (pixels).
 const THUMB_SIZE: u32 = 160;
-/// Maximum results to process per frame.
-const MAX_RESULTS_PER_FRAME: usize = 16;
 
 // ---------------------------------------------------------------------------
 // Worker protocol
@@ -40,14 +44,15 @@ enum WorkTier {
     FullDecode,
 }
 
-/// A work request sent to a decode worker.
-struct WorkRequest {
+/// A decode request sent from the I/O pool to the decode pool.
+/// The file bytes have already been read; this is pure CPU work.
+struct DecodeRequest {
     idx: usize,
     path: PathBuf,
+    data: Vec<u8>,
     generation: u64,
     tier: WorkTier,
-    /// Pre-loaded file bytes (avoids re-reading for FullDecode after EmbeddedMiss).
-    data: Option<Vec<u8>>,
+    is_heif: bool,
 }
 
 /// A completed result from a decode worker.
@@ -103,76 +108,67 @@ pub struct GridView {
     timings: Vec<TileTiming>,
     /// Cached file bytes from HEIC embedded extraction (avoids re-read for full decode).
     cached_data: Vec<Option<Vec<u8>>>,
-    /// Worker pool channels.
-    work_tx: crossbeam_channel::Sender<WorkRequest>,
-    work_rx: crossbeam_channel::Receiver<WorkRequest>,
+    /// Tokio runtime for async I/O (file reads).
+    io_runtime: tokio::runtime::Runtime,
+    /// Decode request channel: I/O pool → decode workers.
+    decode_tx: crossbeam_channel::Sender<DecodeRequest>,
+    decode_rx: crossbeam_channel::Receiver<DecodeRequest>,
+    /// Result channel: decode workers → UI thread.
     result_rx: crossbeam_channel::Receiver<WorkResult>,
     /// Generation counter for stale work invalidation.
     generation: Arc<AtomicU64>,
     /// Last scroll position for change detection.
     last_scroll_y: f32,
-    /// Worker thread handles for clean shutdown.
-    workers: Vec<thread::JoinHandle<()>>,
+    /// Decode worker thread handles for clean shutdown.
+    decode_workers: Vec<thread::JoinHandle<()>>,
 }
 
+/// Size of the prefix read for non-HEIC EXIF extraction.
+const EXIF_PREFIX_SIZE: usize = 256 * 1024;
+
 impl GridView {
-    /// Create a new GridView with the given grid, spawning decode workers.
+    /// Create a new GridView with the given grid, spawning I/O runtime + decode workers.
     pub fn new(grid: Grid) -> Self {
-        let (work_tx, work_rx) = crossbeam_channel::unbounded::<WorkRequest>();
+        let (decode_tx, decode_rx) = crossbeam_channel::unbounded::<DecodeRequest>();
         let (result_tx, result_rx) = crossbeam_channel::unbounded();
         let generation = Arc::new(AtomicU64::new(0));
 
-        let num_workers = std::thread::available_parallelism()
+        // Tokio runtime for I/O: 1 async thread dispatching to auto-scaled blocking pool.
+        let io_runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .max_blocking_threads(128)
+            .thread_name("iv-io")
+            .build()
+            .expect("failed to create tokio runtime");
+
+        // Decode workers: CPU-bound, matched to available cores.
+        let num_decoders = std::thread::available_parallelism()
             .map(|n| n.get().saturating_sub(2).max(2))
             .unwrap_or(4);
 
-        let mut workers = Vec::with_capacity(num_workers);
-        for _ in 0..num_workers {
-            let work_rx = work_rx.clone();
+        let mut decode_workers = Vec::with_capacity(num_decoders);
+        for _ in 0..num_decoders {
+            let decode_rx = decode_rx.clone();
             let result_tx = result_tx.clone();
             let generation = generation.clone();
-            let handle = thread::spawn(move || {
-                while let Ok(req) = work_rx.recv() {
-                    if req.generation < generation.load(Ordering::Relaxed) {
-                        continue;
-                    }
+            let handle = thread::Builder::new()
+                .name("iv-decode".into())
+                .spawn(move || {
+                    while let Ok(req) = decode_rx.recv() {
+                        if req.generation < generation.load(Ordering::Relaxed) {
+                            continue;
+                        }
 
-                    match req.tier {
-                        WorkTier::EmbeddedOnly => {
-                            let start = std::time::Instant::now();
-                            if decode::is_heif_extension(&req.path) {
-                                // HEIC: read full file for BMFF parsing.
-                                // Cache bytes so FullDecode won't re-read.
-                                match std::fs::read(&req.path) {
-                                    Ok(data) => {
-                                        let thumb = decode::try_heif_thumbnail_from_bytes(&data);
-                                        let ms = start.elapsed().as_secs_f64() * 1000.0;
-                                        match thumb {
-                                            Some(image) => {
-                                                let _ = result_tx.send(WorkResult::EmbeddedOk {
-                                                    idx: req.idx,
-                                                    image,
-                                                    ms,
-                                                });
-                                            }
-                                            None => {
-                                                let _ = result_tx.send(WorkResult::EmbeddedMiss {
-                                                    idx: req.idx,
-                                                    ms,
-                                                    data: Some(data),
-                                                });
-                                            }
-                                        }
-                                    }
-                                    Err(_) => {
-                                        let _ = result_tx.send(WorkResult::Failed { idx: req.idx });
-                                    }
-                                }
-                            } else {
-                                // Non-HEIC: fast 256KB EXIF-only read
-                                let (result, _) = decode::try_exif_only(&req.path);
+                        let start = std::time::Instant::now();
+                        match req.tier {
+                            WorkTier::EmbeddedOnly => {
+                                let thumb = if req.is_heif {
+                                    decode::try_heif_thumbnail_from_bytes(&req.data)
+                                } else {
+                                    decode::try_embedded_from_bytes(&req.data)
+                                };
                                 let ms = start.elapsed().as_secs_f64() * 1000.0;
-                                match result {
+                                match thumb {
                                     Some(image) => {
                                         let _ = result_tx.send(WorkResult::EmbeddedOk {
                                             idx: req.idx,
@@ -181,41 +177,38 @@ impl GridView {
                                         });
                                     }
                                     None => {
+                                        // For HEIC, pass full file bytes for FullDecode reuse.
+                                        let data = if req.is_heif { Some(req.data) } else { None };
                                         let _ = result_tx.send(WorkResult::EmbeddedMiss {
                                             idx: req.idx,
                                             ms,
-                                            data: None,
+                                            data,
                                         });
                                     }
                                 }
                             }
-                        }
-                        WorkTier::FullDecode => {
-                            let start = std::time::Instant::now();
-                            let is_heif = decode::is_heif_extension(&req.path);
-                            // Use cached data if available, otherwise read
-                            let data = req.data.or_else(|| std::fs::read(&req.path).ok());
-                            let result = data.and_then(|d| {
-                                decode::decode_from_bytes(&d, THUMB_SIZE, is_heif).ok()
-                            });
-                            let ms = start.elapsed().as_secs_f64() * 1000.0;
-                            match result {
-                                Some((image, _)) => {
-                                    let _ = result_tx.send(WorkResult::FullOk {
-                                        idx: req.idx,
-                                        image,
-                                        ms,
-                                    });
-                                }
-                                None => {
-                                    let _ = result_tx.send(WorkResult::Failed { idx: req.idx });
+                            WorkTier::FullDecode => {
+                                let result =
+                                    decode::decode_from_bytes(&req.data, THUMB_SIZE, req.is_heif);
+                                let ms = start.elapsed().as_secs_f64() * 1000.0;
+                                match result {
+                                    Ok((image, _)) => {
+                                        let _ = result_tx.send(WorkResult::FullOk {
+                                            idx: req.idx,
+                                            image,
+                                            ms,
+                                        });
+                                    }
+                                    Err(_) => {
+                                        let _ = result_tx.send(WorkResult::Failed { idx: req.idx });
+                                    }
                                 }
                             }
                         }
                     }
-                }
-            });
-            workers.push(handle);
+                })
+                .expect("failed to spawn decode worker");
+            decode_workers.push(handle);
         }
 
         Self {
@@ -225,12 +218,13 @@ impl GridView {
             textures: Vec::new(),
             timings: Vec::new(),
             cached_data: Vec::new(),
-            work_tx,
-            work_rx,
+            io_runtime,
+            decode_tx,
+            decode_rx,
             result_rx,
             generation,
             last_scroll_y: 0.0,
-            workers,
+            decode_workers,
         }
     }
 
@@ -267,9 +261,12 @@ impl GridView {
         }
     }
 
-    fn poll_results(&mut self, ctx: &egui::Context) -> usize {
+    fn poll_results(&mut self, ctx: &egui::Context, deadline: &std::time::Instant) -> usize {
         let mut processed = 0;
-        while processed < MAX_RESULTS_PER_FRAME {
+        loop {
+            if std::time::Instant::now() >= *deadline {
+                break;
+            }
             let result = match self.result_rx.try_recv() {
                 Ok(r) => r,
                 Err(_) => break,
@@ -349,17 +346,19 @@ impl GridView {
 
     /// Two-phase scheduling:
     /// 1. All visible NotLoaded tiles → EmbeddedOnly (fast, get something on screen)
-    /// 2. Only after no visible NotLoaded remain: visible CreatingThumbnail → FullDecode
-    fn schedule_visible_work(&mut self) {
+    /// 2. Only after no visible NotLoaded remain: visible EmbeddedMissed → FullDecode
+    ///
+    /// I/O is dispatched to tokio's blocking pool; decoded bytes flow to decode workers.
+    /// Stops scheduling if the frame time budget is exceeded.
+    fn schedule_visible_work(&mut self, deadline: &std::time::Instant) {
         let current_gen = self.generation.load(Ordering::Relaxed);
 
         // Phase 1: embedded thumbnails for NotLoaded tiles (highest priority)
         let not_loaded = self.grid.visible_in_state(TileState::NotLoaded);
         if !not_loaded.is_empty() {
             let mut scheduled_indices = Vec::new();
-            let mut scheduled = 0;
             for idx in not_loaded {
-                if scheduled >= MAX_SCHEDULE_PER_FRAME {
+                if std::time::Instant::now() >= *deadline {
                     break;
                 }
                 let path = self.grid.tile_path(idx).to_path_buf();
@@ -367,15 +366,9 @@ impl GridView {
                     continue;
                 }
                 self.grid.set_tile_state(idx, TileState::LoadingEmbedded);
-                let _ = self.work_tx.send(WorkRequest {
-                    idx,
-                    path,
-                    generation: current_gen,
-                    tier: WorkTier::EmbeddedOnly,
-                    data: None,
-                });
+                let is_heif = decode::is_heif_extension(&path);
+                self.spawn_io_read(idx, path, current_gen, WorkTier::EmbeddedOnly, is_heif);
                 scheduled_indices.push(idx);
-                scheduled += 1;
             }
             if !scheduled_indices.is_empty() {
                 self.grid.record_event(GridEventKind::WorkScheduled {
@@ -389,9 +382,8 @@ impl GridView {
         // Phase 2: full decode for tiles where embedded failed
         let needs_full = self.grid.visible_in_state(TileState::EmbeddedMissed);
         let mut scheduled_indices = Vec::new();
-        let mut scheduled = 0;
         for idx in needs_full {
-            if scheduled >= MAX_SCHEDULE_PER_FRAME {
+            if std::time::Instant::now() >= *deadline {
                 break;
             }
             let path = self.grid.tile_path(idx).to_path_buf();
@@ -399,21 +391,27 @@ impl GridView {
                 continue;
             }
             self.grid.set_tile_state(idx, TileState::CreatingThumbnail);
-            // Pass cached file bytes if available (avoids re-reading HEIC from network)
+            let is_heif = decode::is_heif_extension(&path);
+            // If we have cached bytes from EmbeddedMiss, skip I/O entirely
             let cached = if idx < self.cached_data.len() {
                 self.cached_data[idx].take()
             } else {
                 None
             };
-            let _ = self.work_tx.send(WorkRequest {
-                idx,
-                path,
-                generation: current_gen,
-                tier: WorkTier::FullDecode,
-                data: cached,
-            });
+            if let Some(data) = cached {
+                // Bypass I/O pool — send directly to decode workers
+                let _ = self.decode_tx.send(DecodeRequest {
+                    idx,
+                    path,
+                    data,
+                    generation: current_gen,
+                    tier: WorkTier::FullDecode,
+                    is_heif,
+                });
+            } else {
+                self.spawn_io_read(idx, path, current_gen, WorkTier::FullDecode, is_heif);
+            }
             scheduled_indices.push(idx);
-            scheduled += 1;
         }
         if !scheduled_indices.is_empty() {
             self.grid.record_event(GridEventKind::WorkScheduled {
@@ -421,6 +419,59 @@ impl GridView {
                 tier: "full_decode".into(),
             });
         }
+    }
+
+    /// Spawn a tokio blocking task to read a file and push bytes to the decode pool.
+    fn spawn_io_read(
+        &self,
+        idx: usize,
+        path: PathBuf,
+        generation: u64,
+        tier: WorkTier,
+        is_heif: bool,
+    ) {
+        let decode_tx = self.decode_tx.clone();
+        let gen_counter = self.generation.clone();
+        self.io_runtime.spawn_blocking(move || {
+            // Check generation before I/O
+            if generation < gen_counter.load(Ordering::Relaxed) {
+                return;
+            }
+            let data = match tier {
+                WorkTier::EmbeddedOnly if !is_heif => {
+                    // Non-HEIC: only read 256KB prefix for EXIF extraction
+                    let Ok(mut file) = std::fs::File::open(&path) else {
+                        return;
+                    };
+                    let file_len = file.metadata().map(|m| m.len() as usize).unwrap_or(0);
+                    let read_len = file_len.min(EXIF_PREFIX_SIZE);
+                    let mut buf = vec![0u8; read_len];
+                    if std::io::Read::read_exact(&mut file, &mut buf).is_err() {
+                        return;
+                    }
+                    buf
+                }
+                _ => {
+                    // HEIC EmbeddedOnly or any FullDecode: read full file
+                    match std::fs::read(&path) {
+                        Ok(d) => d,
+                        Err(_) => return,
+                    }
+                }
+            };
+            // Check generation again after I/O (may have scrolled during read)
+            if generation < gen_counter.load(Ordering::Relaxed) {
+                return;
+            }
+            let _ = decode_tx.send(DecodeRequest {
+                idx,
+                path,
+                data,
+                generation,
+                tier,
+                is_heif,
+            });
+        });
     }
 
     // -- Scroll generation --------------------------------------------------
@@ -431,7 +482,8 @@ impl GridView {
         if (scroll - self.last_scroll_y).abs() > cell_h * 2.0 {
             self.last_scroll_y = scroll;
             let new_gen = self.generation.fetch_add(1, Ordering::Relaxed) + 1;
-            while self.work_rx.try_recv().is_ok() {}
+            // Drain pending decode requests (I/O tasks check generation before sending)
+            while self.decode_rx.try_recv().is_ok() {}
             let mut reset_count = 0;
             for idx in 0..self.grid.tile_count() {
                 match self.grid.tile_state(idx) {
@@ -467,9 +519,11 @@ impl GridView {
         ctx.set_style(style);
 
         let frame_start = std::time::Instant::now();
+        let deadline =
+            frame_start + std::time::Duration::from_secs_f64(FRAME_WORK_BUDGET_MS / 1000.0);
 
         let poll_start = std::time::Instant::now();
-        let results_processed = self.poll_results(ctx);
+        let results_processed = self.poll_results(ctx, &deadline);
         let results_pending = self.result_rx.len();
         let poll_ms = poll_start.elapsed().as_secs_f64() * 1000.0;
 
@@ -497,7 +551,7 @@ impl GridView {
                 self.grid.set_scroll(scroll_offset);
 
                 self.check_scroll_generation();
-                self.schedule_visible_work();
+                self.schedule_visible_work(&deadline);
 
                 let cols = self.grid.cols();
                 let total_rows = self.grid.total_rows();
@@ -746,22 +800,21 @@ impl GridView {
 
 impl Drop for GridView {
     fn drop(&mut self) {
-        // Drop channels to signal workers to exit after current work.
-        // work_tx drop causes workers' recv() to return Err.
-        // work_rx drop ensures no lingering channel references.
-        let work_tx = std::mem::replace(
-            &mut self.work_tx,
-            crossbeam_channel::unbounded::<WorkRequest>().0,
+        // Drop decode channels to signal decode workers to exit.
+        let decode_tx = std::mem::replace(
+            &mut self.decode_tx,
+            crossbeam_channel::unbounded::<DecodeRequest>().0,
         );
-        drop(work_tx);
-        let work_rx = std::mem::replace(
-            &mut self.work_rx,
-            crossbeam_channel::unbounded::<WorkRequest>().1,
+        drop(decode_tx);
+        let decode_rx = std::mem::replace(
+            &mut self.decode_rx,
+            crossbeam_channel::unbounded::<DecodeRequest>().1,
         );
-        drop(work_rx);
-        // Wait for workers to finish any in-progress decode
-        for handle in self.workers.drain(..) {
+        drop(decode_rx);
+        // Wait for decode workers to finish any in-progress work
+        for handle in self.decode_workers.drain(..) {
             let _ = handle.join();
         }
+        // Tokio runtime shuts down when dropped (waits for blocking tasks).
     }
 }

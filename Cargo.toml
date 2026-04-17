@@ -23,6 +23,7 @@ kamadak-exif = "0.6"
 zune-jpeg = "0.5"
 zune-core = "0.5"
 crossbeam-channel = "0.5"
+tokio = { version = "1", features = ["rt-multi-thread", "fs"] }
 log = "0.4"
 env_logger = "0.11"
 rust-i18n = "3"
