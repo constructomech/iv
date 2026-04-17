@@ -667,7 +667,7 @@ impl GridView {
                 painter.rect_filled(
                     rect,
                     2.0,
-                    egui::Color32::from_rgba_premultiplied(255, 255, 255, alpha),
+                    egui::Color32::from_rgba_unmultiplied(255, 255, 255, alpha),
                 );
             }
 
