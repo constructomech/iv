@@ -31,6 +31,78 @@ const FRAME_WORK_BUDGET_MS: f64 = 4.0;
 /// Thumbnail decode resolution (pixels).
 const THUMB_SIZE: u32 = 160;
 
+/// Probe read size — 64KB covers HEIC meta box + thumbnail data for most
+/// camera originals, JPEG APP1 with embedded thumbnail, PNG chunk headers
+/// before IDAT, and WebP VP8X + initial chunk scan.
+const PROBE_SIZE: usize = 64 * 1024;
+/// Fallback prefix size for formats without smart probing (TIFF, etc).
+const EXIF_PREFIX_SIZE: usize = 256 * 1024;
+
+// ---------------------------------------------------------------------------
+// Smart I/O read (run on tokio blocking threads)
+// ---------------------------------------------------------------------------
+
+/// Unified smart I/O: small probe → format detection → targeted read.
+/// Works for all formats: JPEG, HEIC, PNG, WebP, GIF, BMP, TIFF, etc.
+fn io_read_embedded_smart(
+    path: &std::path::Path,
+    gen_counter: &Arc<AtomicU64>,
+    generation: u64,
+    is_heif: bool,
+) -> Option<Vec<u8>> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let mut file = std::fs::File::open(path).ok()?;
+    let file_len = file.metadata().ok()?.len();
+
+    // Single 8KB probe covers all format detection + HEIC meta + PNG/WebP chunk headers
+    let probe_len = (file_len as usize).min(PROBE_SIZE);
+    let mut probe = vec![0u8; probe_len];
+    file.read_exact(&mut probe).ok()?;
+
+    if generation < gen_counter.load(Ordering::Relaxed) {
+        return None;
+    }
+
+    match decode::probe_embedded_thumbnail(&probe, file_len) {
+        decode::ProbeResult::ContainedInProbe { data } => Some(data),
+        decode::ProbeResult::NeedsRead { offset, length } => {
+            if is_heif {
+                // HEIC: libheif needs a well-formed file to decode HEVC thumbnails.
+                // A truncated mdat causes green corruption. Read the full file.
+                std::fs::read(path).ok()
+            } else {
+                // Other formats: targeted read at exact offset
+                let mut buf = vec![0u8; length];
+                file.seek(SeekFrom::Start(offset)).ok()?;
+                file.read_exact(&mut buf).ok()?;
+                Some(buf)
+            }
+        }
+        decode::ProbeResult::NoThumbnail => {
+            // Return probe so decode can confirm EmbeddedMiss
+            Some(probe)
+        }
+        decode::ProbeResult::Inconclusive => {
+            // Fall back to prefix read
+            read_prefix(&mut file, file_len as usize, &probe)
+        }
+    }
+}
+
+/// Read up to EXIF_PREFIX_SIZE from a file, reusing already-read probe bytes.
+fn read_prefix(file: &mut std::fs::File, file_len: usize, probe: &[u8]) -> Option<Vec<u8>> {
+    use std::io::Read;
+    let read_len = file_len.min(EXIF_PREFIX_SIZE);
+    let already = probe.len().min(read_len);
+    let mut buf = vec![0u8; read_len];
+    buf[..already].copy_from_slice(&probe[..already]);
+    if already < read_len {
+        file.read_exact(&mut buf[already..]).ok()?;
+    }
+    Some(buf)
+}
+
 // ---------------------------------------------------------------------------
 // Worker protocol
 // ---------------------------------------------------------------------------
@@ -123,9 +195,6 @@ pub struct GridView {
     decode_workers: Vec<thread::JoinHandle<()>>,
 }
 
-/// Size of the prefix read for non-HEIC EXIF extraction.
-const EXIF_PREFIX_SIZE: usize = 256 * 1024;
-
 impl GridView {
     /// Create a new GridView with the given grid, spawning I/O runtime + decode workers.
     pub fn new(grid: Grid) -> Self {
@@ -177,8 +246,13 @@ impl GridView {
                                         });
                                     }
                                     None => {
-                                        // For HEIC, pass full file bytes for FullDecode reuse.
-                                        let data = if req.is_heif { Some(req.data) } else { None };
+                                        // For HEIC, pass file bytes for FullDecode reuse —
+                                        // but only if we have enough data (not a small probe).
+                                        let data = if req.is_heif && req.data.len() > PROBE_SIZE {
+                                            Some(req.data)
+                                        } else {
+                                            None
+                                        };
                                         let _ = result_tx.send(WorkResult::EmbeddedMiss {
                                             idx: req.idx,
                                             ms,
@@ -433,33 +507,21 @@ impl GridView {
         let decode_tx = self.decode_tx.clone();
         let gen_counter = self.generation.clone();
         self.io_runtime.spawn_blocking(move || {
-            // Check generation before I/O
             if generation < gen_counter.load(Ordering::Relaxed) {
                 return;
             }
+
             let data = match tier {
-                WorkTier::EmbeddedOnly if !is_heif => {
-                    // Non-HEIC: only read 256KB prefix for EXIF extraction
-                    let Ok(mut file) = std::fs::File::open(&path) else {
-                        return;
-                    };
-                    let file_len = file.metadata().map(|m| m.len() as usize).unwrap_or(0);
-                    let read_len = file_len.min(EXIF_PREFIX_SIZE);
-                    let mut buf = vec![0u8; read_len];
-                    if std::io::Read::read_exact(&mut file, &mut buf).is_err() {
-                        return;
-                    }
-                    buf
+                WorkTier::EmbeddedOnly => {
+                    io_read_embedded_smart(&path, &gen_counter, generation, is_heif)
                 }
-                _ => {
-                    // HEIC EmbeddedOnly or any FullDecode: read full file
-                    match std::fs::read(&path) {
-                        Ok(d) => d,
-                        Err(_) => return,
-                    }
+                WorkTier::FullDecode => {
+                    // Full decode always needs the entire file
+                    std::fs::read(&path).ok()
                 }
             };
-            // Check generation again after I/O (may have scrolled during read)
+
+            let Some(data) = data else { return };
             if generation < gen_counter.load(Ordering::Relaxed) {
                 return;
             }
