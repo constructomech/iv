@@ -418,16 +418,17 @@ impl GridView {
 
     // -- Scheduling ---------------------------------------------------------
 
-    /// Two-phase scheduling:
-    /// 1. All visible NotLoaded tiles → EmbeddedOnly (fast, get something on screen)
-    /// 2. Only after no visible NotLoaded remain: visible EmbeddedMissed → FullDecode
+    /// Three-phase scheduling:
+    /// 1. All visible NotLoaded tiles → EmbeddedOnly (highest priority)
+    /// 2. All visible EmbeddedMissed tiles → FullDecode
+    /// 3. Off-screen NotLoaded tiles → EmbeddedOnly (preloading, nearest first)
     ///
     /// I/O is dispatched to tokio's blocking pool; decoded bytes flow to decode workers.
     /// Stops scheduling if the frame time budget is exceeded.
-    fn schedule_visible_work(&mut self, deadline: &std::time::Instant) {
+    fn schedule_work(&mut self, deadline: &std::time::Instant) {
         let current_gen = self.generation.load(Ordering::Relaxed);
 
-        // Phase 1: embedded thumbnails for NotLoaded tiles (highest priority)
+        // Phase 1: embedded thumbnails for visible NotLoaded tiles
         let not_loaded = self.grid.visible_in_state(TileState::NotLoaded);
         if !not_loaded.is_empty() {
             let mut scheduled_indices = Vec::new();
@@ -453,46 +454,131 @@ impl GridView {
             return;
         }
 
-        // Phase 2: full decode for tiles where embedded failed
+        // Phase 2: full decode for visible tiles where embedded failed
         let needs_full = self.grid.visible_in_state(TileState::EmbeddedMissed);
-        let mut scheduled_indices = Vec::new();
-        for idx in needs_full {
+        if !needs_full.is_empty() {
+            let mut scheduled_indices = Vec::new();
+            for idx in needs_full {
+                if std::time::Instant::now() >= *deadline {
+                    break;
+                }
+                let path = self.grid.tile_path(idx).to_path_buf();
+                if path.as_os_str().is_empty() {
+                    continue;
+                }
+                self.grid.set_tile_state(idx, TileState::CreatingThumbnail);
+                let is_heif = decode::is_heif_extension(&path);
+                let cached = if idx < self.cached_data.len() {
+                    self.cached_data[idx].take()
+                } else {
+                    None
+                };
+                if let Some(data) = cached {
+                    let _ = self.decode_tx.send(DecodeRequest {
+                        idx,
+                        path,
+                        data,
+                        generation: current_gen,
+                        tier: WorkTier::FullDecode,
+                        is_heif,
+                    });
+                } else {
+                    self.spawn_io_read(idx, path, current_gen, WorkTier::FullDecode, is_heif);
+                }
+                scheduled_indices.push(idx);
+            }
+            if !scheduled_indices.is_empty() {
+                self.grid.record_event(GridEventKind::WorkScheduled {
+                    indices: scheduled_indices,
+                    tier: "full_decode".into(),
+                });
+            }
+            return;
+        }
+
+        // Phase 3: preload off-screen NotLoaded tiles (nearest to viewport first)
+        // Only runs when all visible tiles are in-flight or loaded.
+        if std::time::Instant::now() >= *deadline {
+            return;
+        }
+        self.schedule_offscreen_embedded(current_gen, deadline);
+    }
+
+    /// Schedule embedded thumbnail extraction for off-screen tiles,
+    /// expanding outward from the visible range so nearby tiles load first.
+    fn schedule_offscreen_embedded(&mut self, current_gen: u64, deadline: &std::time::Instant) {
+        let (vis_start, vis_end) = self.grid.visible_tile_range();
+        let total = self.grid.tile_count();
+        if total == 0 {
+            return;
+        }
+
+        // Interleave: one tile below viewport, one above, expanding outward
+        let mut below = vis_end;
+        let mut above = vis_start.wrapping_sub(1); // will wrap to usize::MAX if vis_start == 0
+        let mut scheduled_count = 0;
+
+        loop {
             if std::time::Instant::now() >= *deadline {
                 break;
             }
-            let path = self.grid.tile_path(idx).to_path_buf();
-            if path.as_os_str().is_empty() {
-                continue;
+
+            let mut found = false;
+
+            // Try below viewport
+            while below < total {
+                if self.grid.tile_state(below) == TileState::NotLoaded {
+                    let path = self.grid.tile_path(below).to_path_buf();
+                    if !path.as_os_str().is_empty() {
+                        self.grid.set_tile_state(below, TileState::LoadingEmbedded);
+                        let is_heif = decode::is_heif_extension(&path);
+                        self.spawn_io_read(
+                            below,
+                            path,
+                            current_gen,
+                            WorkTier::EmbeddedOnly,
+                            is_heif,
+                        );
+                        scheduled_count += 1;
+                        found = true;
+                        below += 1;
+                        break;
+                    }
+                }
+                below += 1;
             }
-            self.grid.set_tile_state(idx, TileState::CreatingThumbnail);
-            let is_heif = decode::is_heif_extension(&path);
-            // If we have cached bytes from EmbeddedMiss, skip I/O entirely
-            let cached = if idx < self.cached_data.len() {
-                self.cached_data[idx].take()
-            } else {
-                None
-            };
-            if let Some(data) = cached {
-                // Bypass I/O pool — send directly to decode workers
-                let _ = self.decode_tx.send(DecodeRequest {
-                    idx,
-                    path,
-                    data,
-                    generation: current_gen,
-                    tier: WorkTier::FullDecode,
-                    is_heif,
-                });
-            } else {
-                self.spawn_io_read(idx, path, current_gen, WorkTier::FullDecode, is_heif);
+
+            // Try above viewport
+            while above < total {
+                // above wraps to usize::MAX when it underflows, which is >= total
+                if self.grid.tile_state(above) == TileState::NotLoaded {
+                    let path = self.grid.tile_path(above).to_path_buf();
+                    if !path.as_os_str().is_empty() {
+                        self.grid.set_tile_state(above, TileState::LoadingEmbedded);
+                        let is_heif = decode::is_heif_extension(&path);
+                        self.spawn_io_read(
+                            above,
+                            path,
+                            current_gen,
+                            WorkTier::EmbeddedOnly,
+                            is_heif,
+                        );
+                        scheduled_count += 1;
+                        found = true;
+                    }
+                }
+                above = above.wrapping_sub(1);
+                if found {
+                    break;
+                }
             }
-            scheduled_indices.push(idx);
+
+            if !found {
+                break; // no more NotLoaded tiles in either direction
+            }
         }
-        if !scheduled_indices.is_empty() {
-            self.grid.record_event(GridEventKind::WorkScheduled {
-                indices: scheduled_indices,
-                tier: "full_decode".into(),
-            });
-        }
+
+        let _ = scheduled_count;
     }
 
     /// Spawn a tokio blocking task to read a file and push bytes to the decode pool.
@@ -613,7 +699,7 @@ impl GridView {
                 self.grid.set_scroll(scroll_offset);
 
                 self.check_scroll_generation();
-                self.schedule_visible_work(&deadline);
+                self.schedule_work(&deadline);
 
                 let cols = self.grid.cols();
                 let total_rows = self.grid.total_rows();
@@ -699,9 +785,9 @@ impl GridView {
             results_pending,
         });
 
-        // Repaint while visible tiles are pending
+        // Repaint while any tiles are pending (visible or off-screen preloading)
         if self.grid.tile_count() > 0 {
-            let has_pending = !self.grid.visible_in_state(TileState::NotLoaded).is_empty()
+            let has_visible_pending = !self.grid.visible_in_state(TileState::NotLoaded).is_empty()
                 || !self
                     .grid
                     .visible_in_state(TileState::LoadingEmbedded)
@@ -714,8 +800,13 @@ impl GridView {
                     .grid
                     .visible_in_state(TileState::CreatingThumbnail)
                     .is_empty();
-            if has_pending {
+            let has_offscreen_pending = !self.result_rx.is_empty();
+            if has_visible_pending {
+                // Visible work: repaint at 60fps for responsiveness
                 ctx.request_repaint_after(std::time::Duration::from_millis(16));
+            } else if has_offscreen_pending {
+                // Off-screen work: repaint at 10fps to process results without wasting CPU
+                ctx.request_repaint_after(std::time::Duration::from_millis(100));
             }
         }
 
