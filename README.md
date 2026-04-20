@@ -140,17 +140,29 @@ This project includes VS Code configuration in `.vscode/`:
 
 ```
 iv/
-├── .vscode/           # VS Code build/debug/settings
+├── .vscode/              # VS Code build/debug/settings
+├── examples/
+│   ├── bench.rs          # Decode benchmark suite
+│   └── exif_diag.rs      # EXIF thumbnail extraction diagnostics
+├── iv-thumb/             # Separate GPL-licensed thumbnail embedder (not a workspace member)
+├── locales/
+│   └── en.yml            # i18n strings
 ├── src/
-│   ├── main.rs        # Entry point, CLI parsing, eframe launch
-│   └── app.rs         # eframe::App — image loading & display
-│                      #   (pure functions + unit tests at bottom)
+│   ├── main.rs           # Entry point, CLI parsing, eframe launch
+│   ├── app.rs            # eframe::App — top-level UI (grid ↔ image view)
+│   ├── lib.rs            # Library root, module exports
+│   ├── decode.rs         # Image decoding, EXIF thumbnail extraction, timing
+│   ├── enumerator.rs     # Background directory walker (sends paths via channel)
+│   ├── grid.rs           # Pure grid data structure — layout math & tile states
+│   ├── grid_view.rs      # Grid renderer — two-phase loading, workers, textures
+│   └── image_view.rs     # Full-resolution viewer with zoom, pan, navigation
 ├── tests/
 │   ├── common/
-│   │   └── mod.rs     # Test helpers — synthetic image generation
+│   │   └── mod.rs        # Test helpers — synthetic image generation
 │   └── image_loading.rs  # Integration tests for the load pipeline
 ├── Cargo.toml
-├── PLAN.md            # Phased development plan
+├── ARCHITECTURE.md       # Grid, tile state machine, worker model docs
+├── PLAN.md               # Phased development plan
 └── README.md
 ```
 
