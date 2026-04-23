@@ -17,9 +17,19 @@ pub struct DecodedImage {
 
 /// Load an image file from disk and decode it to RGBA, applying EXIF orientation.
 /// For HEIC/HEIF, libheif applies orientation internally, so we skip it.
+/// For raw files (DNG, CR2, NEF, etc.), extracts the largest embedded JPEG preview.
 pub fn load_image(path: &Path) -> Result<DecodedImage, String> {
     let data =
         std::fs::read(path).map_err(|e| format!("Failed to read {}: {e}", path.display()))?;
+
+    // Raw files: extract the largest embedded JPEG preview from the TIFF structure.
+    // image::load_from_memory on raw TIFF often returns a tiny IFD1 thumbnail.
+    if crate::decode::is_raw_extension(path)
+        && let Some(decoded) = crate::decode::load_raw_preview(&data)
+    {
+        return Ok(decoded);
+    }
+
     let img = image::load_from_memory(&data)
         .map_err(|e| format!("Failed to decode {}: {e}", path.display()))?;
     // libheif applies orientation during decode for HEIC/HEIF,

@@ -171,12 +171,15 @@ and the state stays `Loaded`.
 `try_exif_only()` attempts fast thumbnail extraction by reading minimal
 data from disk:
 
-**JPEG / TIFF / RAW files**: Reads at most 256KB (`EXIF_READ_SIZE`). Parses
-the EXIF IFD structure to find `JPEGInterchangeFormat` and
-`JPEGInterchangeFormatLength` tags. Searches for JPEG SOI/EOI markers in
-the indicated byte range and decodes the embedded JPEG with `zune-jpeg`.
-This works for JPEG, TIFF, DNG, CR2, NEF, and ARW files — they all use
-the same EXIF/TIFF IFD structure.
+**JPEG / TIFF / RAW files**: For JPEG, the probe scans for the APP1 marker
+and reads only the EXIF segment. For TIFF-based formats (DNG, CR2, NEF,
+ARW, etc.), a custom IFD parser scans the TIFF directory chain
+(IFD0 → SubIFDs → IFD1) within the 64KB probe to locate the embedded JPEG
+thumbnail's offset and length. The IFD parser only reads the tags it needs
+(Orientation, JPEGInterchangeFormat, JPEGInterchangeFormatLength, SubIFDs),
+so it handles truncated data robustly — unlike the full EXIF library which
+fails when tag values reference offsets beyond the buffer. The JPEG
+thumbnail is then decoded directly with `zune-jpeg`.
 
 **HEIC / HEIF files**: Uses `libheif-rs` to open the file as an ISOBMFF
 container, get the primary image handle, check `number_of_thumbnails()`,
@@ -201,7 +204,17 @@ decode is the slowest due to HEVC/AV1 decompression.
 
 Both paths apply EXIF orientation after decoding. `read_exif_orientation()`
 parses the orientation tag (values 1–8) and `apply_orientation()` performs
-the corresponding rotation/mirror transform.
+the corresponding rotation/mirror transform. For TIFF-based files, the
+custom IFD parser reads orientation directly from tag 0x0112.
+
+### Full-Resolution Raw Preview
+
+When opening a raw file (DNG, CR2, NEF, etc.) in full-size image view,
+`load_raw_preview()` parses the TIFF IFD structure to find the *largest*
+embedded JPEG preview and decodes that. This is typically the IFD0 JPEG
+preview (1024–1600px wide), much larger than the IFD1 thumbnail used for
+grid view. Falls back to `image::load_from_memory()` if no embedded JPEG
+is found.
 
 ## Row-Based Virtualization
 

@@ -295,6 +295,256 @@ fn read_uint_probe(data: &[u8], size: usize) -> u64 {
 }
 
 // ---------------------------------------------------------------------------
+// TIFF IFD parsing helpers — used for DNG, CR2, NEF, ARW, etc.
+// ---------------------------------------------------------------------------
+
+/// Read a u16 from TIFF data with the correct byte order.
+fn tiff_u16(data: &[u8], off: usize, le: bool) -> Option<u16> {
+    let bytes: [u8; 2] = data.get(off..off + 2)?.try_into().ok()?;
+    Some(if le {
+        u16::from_le_bytes(bytes)
+    } else {
+        u16::from_be_bytes(bytes)
+    })
+}
+
+/// Read a u32 from TIFF data with the correct byte order.
+fn tiff_u32(data: &[u8], off: usize, le: bool) -> Option<u32> {
+    let bytes: [u8; 4] = data.get(off..off + 4)?.try_into().ok()?;
+    Some(if le {
+        u32::from_le_bytes(bytes)
+    } else {
+        u32::from_be_bytes(bytes)
+    })
+}
+
+/// Location of an embedded JPEG in a TIFF file.
+struct TiffJpeg {
+    offset: u64,
+    length: u64,
+}
+
+/// Parsed info from a single TIFF IFD entry.
+struct TiffIfdInfo {
+    next_ifd: u32,
+    jpeg: Option<TiffJpeg>,
+    sub_ifds: Vec<u32>,
+    orientation: Option<u32>,
+}
+
+/// Parse a single TIFF IFD, extracting JPEG location, SubIFD offsets, and orientation.
+///
+/// Finds JPEG data from two sources:
+/// - `JPEGInterchangeFormat` / `JPEGInterchangeFormatLength` (tags 0x0201/0x0202)
+///   — used by IFD1 for small thumbnails.
+/// - `StripOffsets` / `StripByteCounts` with `Compression = 7` (JPEG)
+///   — used by IFD0 in DNG for the large preview image.
+fn parse_tiff_ifd(data: &[u8], ifd_off: usize, le: bool) -> Option<TiffIfdInfo> {
+    let count = tiff_u16(data, ifd_off, le)? as usize;
+    let entries_end = ifd_off
+        .checked_add(2)?
+        .checked_add(count.checked_mul(12)?)?;
+    if entries_end.checked_add(4)? > data.len() {
+        return None;
+    }
+
+    let mut jpeg_offset: Option<u32> = None;
+    let mut jpeg_length: Option<u32> = None;
+    let mut strip_offset: Option<u32> = None;
+    let mut strip_length: Option<u32> = None;
+    let mut compression: Option<u16> = None;
+    let mut sub_ifds: Vec<u32> = Vec::new();
+    let mut orientation: Option<u32> = None;
+
+    for i in 0..count {
+        let e = ifd_off + 2 + i * 12;
+        let tag = tiff_u16(data, e, le)?;
+        let field_type = tiff_u16(data, e + 2, le)?;
+        let fcount = tiff_u32(data, e + 4, le)?;
+        let value_off = e + 8;
+
+        match tag {
+            0x0103 => {
+                // Compression — SHORT
+                compression = Some(tiff_u16(data, value_off, le)?);
+            }
+            0x0111 => {
+                // StripOffsets — LONG or SHORT, single strip
+                if fcount == 1 {
+                    strip_offset = Some(if field_type == 3 {
+                        tiff_u16(data, value_off, le)? as u32
+                    } else {
+                        tiff_u32(data, value_off, le)?
+                    });
+                }
+            }
+            0x0112 => {
+                // Orientation — SHORT(3) or LONG(4)
+                orientation = Some(if field_type == 3 {
+                    tiff_u16(data, value_off, le)? as u32
+                } else {
+                    tiff_u32(data, value_off, le)?
+                });
+            }
+            0x0117 => {
+                // StripByteCounts — LONG or SHORT, single strip
+                if fcount == 1 {
+                    strip_length = Some(if field_type == 3 {
+                        tiff_u16(data, value_off, le)? as u32
+                    } else {
+                        tiff_u32(data, value_off, le)?
+                    });
+                }
+            }
+            0x0201 => jpeg_offset = Some(tiff_u32(data, value_off, le)?),
+            0x0202 => jpeg_length = Some(tiff_u32(data, value_off, le)?),
+            0x014A => {
+                // SubIFDs — array of LONG offsets
+                if fcount == 1 {
+                    sub_ifds.push(tiff_u32(data, value_off, le)?);
+                } else {
+                    let arr_off = tiff_u32(data, value_off, le)? as usize;
+                    for j in 0..fcount as usize {
+                        if let Some(v) = tiff_u32(data, arr_off + j * 4, le) {
+                            sub_ifds.push(v);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let next_ifd = tiff_u32(data, entries_end, le).unwrap_or(0);
+
+    // Prefer JPEGInterchangeFormat, fall back to StripOffsets with JPEG compression
+    let jpeg_info = match (jpeg_offset, jpeg_length) {
+        (Some(off), Some(len)) if len > 0 => Some(TiffJpeg {
+            offset: off as u64,
+            length: len as u64,
+        }),
+        _ => {
+            // StripOffsets/StripByteCounts with Compression=7 (JPEG)
+            if compression == Some(7) {
+                match (strip_offset, strip_length) {
+                    (Some(off), Some(len)) if len > 0 => Some(TiffJpeg {
+                        offset: off as u64,
+                        length: len as u64,
+                    }),
+                    _ => None,
+                }
+            } else {
+                None
+            }
+        }
+    };
+
+    Some(TiffIfdInfo {
+        next_ifd,
+        jpeg: jpeg_info,
+        sub_ifds,
+        orientation,
+    })
+}
+
+/// Find all embedded JPEG entries in a TIFF file, along with orientation.
+/// Parses IFD0 → SubIFDs → IFD1. Returns `(jpeg_entries, orientation)`.
+fn find_tiff_jpegs(data: &[u8]) -> Option<(Vec<TiffJpeg>, u32)> {
+    if data.len() < 8 {
+        return None;
+    }
+    let le = data[0] == b'I';
+    let magic = tiff_u16(data, 2, le)?;
+    if magic != 42 {
+        return None;
+    }
+
+    let ifd0_off = tiff_u32(data, 4, le)? as usize;
+    if ifd0_off >= data.len() {
+        return None;
+    }
+
+    let mut jpegs = Vec::new();
+    let mut orientation = 1u32;
+
+    // Parse IFD0
+    let ifd0 = parse_tiff_ifd(data, ifd0_off, le)?;
+
+    if let Some(o) = ifd0.orientation {
+        orientation = o;
+    }
+    if let Some(j) = ifd0.jpeg {
+        jpegs.push(j);
+    }
+
+    // Parse SubIFDs from IFD0
+    for &sub_off in &ifd0.sub_ifds {
+        if (sub_off as usize) < data.len()
+            && let Some(info) = parse_tiff_ifd(data, sub_off as usize, le)
+            && let Some(j) = info.jpeg
+        {
+            jpegs.push(j);
+        }
+    }
+
+    // Parse IFD1
+    if ifd0.next_ifd > 0
+        && (ifd0.next_ifd as usize) < data.len()
+        && let Some(info) = parse_tiff_ifd(data, ifd0.next_ifd as usize, le)
+        && let Some(j) = info.jpeg
+    {
+        jpegs.push(j);
+    }
+
+    Some((jpegs, orientation))
+}
+
+/// TIFF probe: parse IFD structure to locate embedded JPEG thumbnail.
+/// DNG, CR2, NEF, ARW, etc. are all TIFF-based with JPEG thumbnails.
+fn probe_tiff(header: &[u8]) -> ProbeResult {
+    let Some((jpegs, _)) = find_tiff_jpegs(header) else {
+        return ProbeResult::Inconclusive;
+    };
+
+    if jpegs.is_empty() {
+        return ProbeResult::NoThumbnail;
+    }
+
+    // Pick the smallest JPEG whose data fits in the probe buffer.
+    // For grid thumbnails, any embedded JPEG is fine — they all get
+    // downscaled to 160px. Smallest = fastest to decode.
+    let best = jpegs
+        .iter()
+        .filter(|j| {
+            let end = (j.offset + j.length) as usize;
+            j.length > 1024 && end <= header.len()
+        })
+        .min_by_key(|j| j.length);
+
+    if best.is_some() {
+        // JPEG data is within our probe buffer
+        ProbeResult::ContainedInProbe {
+            data: header.to_vec(),
+        }
+    } else {
+        // JPEG exists but is beyond probe — need a prefix read
+        // that includes the TIFF header (for IFD parsing) + the JPEG data.
+        let best = jpegs
+            .iter()
+            .filter(|j| j.length > 1024)
+            .min_by_key(|j| j.length)
+            .or(jpegs.first());
+        match best {
+            Some(j) => ProbeResult::NeedsRead {
+                offset: 0,
+                length: (j.offset + j.length) as usize,
+            },
+            None => ProbeResult::NoThumbnail,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Unified probe: detect format by magic bytes, dispatch to format-specific probe
 // ---------------------------------------------------------------------------
 
@@ -340,9 +590,9 @@ pub fn probe_embedded_thumbnail(header: &[u8], file_len: u64) -> ProbeResult {
         return ProbeResult::NoThumbnail;
     }
 
-    // TIFF: II (little-endian) or MM (big-endian) — rare thumbnails, use prefix
+    // TIFF: II (little-endian) or MM (big-endian) — DNG, CR2, NEF, ARW, etc.
     if (header[0] == b'I' && header[1] == b'I') || (header[0] == b'M' && header[1] == b'M') {
-        return ProbeResult::Inconclusive; // fall back to prefix read
+        return probe_tiff(header);
     }
 
     ProbeResult::Inconclusive
@@ -563,6 +813,15 @@ pub fn try_exif_only(path: &Path) -> (Option<DecodedImage>, DecodeTimings) {
 /// For non-HEIC data, parses EXIF and applies orientation.
 /// For HEIC data, use `try_heif_thumbnail_from_bytes` directly.
 pub fn try_embedded_from_bytes(data: &[u8]) -> Option<DecodedImage> {
+    // Fast path for TIFF-based formats (DNG, CR2, NEF, etc.)
+    // The EXIF library often fails on truncated TIFF data, so we parse
+    // IFD structure directly to find the embedded JPEG thumbnail.
+    if data.len() >= 4
+        && ((data[0] == b'I' && data[1] == b'I') || (data[0] == b'M' && data[1] == b'M'))
+    {
+        return try_tiff_embedded_direct(data);
+    }
+
     let orientation = read_exif_orientation(data);
     let mut decoded = extract_exif_thumbnail(data)?;
 
@@ -578,6 +837,80 @@ pub fn try_embedded_from_bytes(data: &[u8]) -> Option<DecodedImage> {
     }
 
     Some(decoded)
+}
+
+/// Extract JPEG thumbnail directly from TIFF-based data using IFD parsing.
+/// More robust than the EXIF library for truncated TIFF data (e.g. 64KB probe).
+fn try_tiff_embedded_direct(data: &[u8]) -> Option<DecodedImage> {
+    let (jpegs, orientation) = find_tiff_jpegs(data)?;
+
+    // Pick the smallest JPEG that fits in the buffer (for grid thumbnail)
+    let best = jpegs
+        .iter()
+        .filter(|j| {
+            let end = (j.offset + j.length) as usize;
+            j.length > 1024 && end <= data.len()
+        })
+        .min_by_key(|j| j.length)?;
+
+    let start = best.offset as usize;
+    let end = start + best.length as usize;
+    let jpeg_data = &data[start..end];
+    let mut decoded = decode_jpeg_bytes(jpeg_data)?;
+
+    if orientation != 1 {
+        let img = image::RgbaImage::from_raw(decoded.width, decoded.height, decoded.pixels)?;
+        let oriented = apply_orientation(image::DynamicImage::ImageRgba8(img), orientation);
+        let rgba = oriented.to_rgba8();
+        decoded = DecodedImage {
+            width: rgba.width(),
+            height: rgba.height(),
+            pixels: rgba.into_raw(),
+        };
+    }
+
+    Some(decoded)
+}
+
+/// Extract the largest embedded JPEG preview from TIFF-based raw file data.
+/// Used for full-resolution viewing of DNG, CR2, NEF, etc.
+/// The full file bytes must be provided so all JPEG entries are accessible.
+pub fn load_raw_preview(data: &[u8]) -> Option<DecodedImage> {
+    let (jpegs, orientation) = find_tiff_jpegs(data)?;
+
+    // Pick the largest JPEG for full-resolution preview
+    let best = jpegs
+        .iter()
+        .filter(|j| {
+            let end = (j.offset + j.length) as usize;
+            end <= data.len()
+        })
+        .max_by_key(|j| j.length)?;
+
+    let start = best.offset as usize;
+    let end = start + best.length as usize;
+    let jpeg_data = &data[start..end];
+
+    let img = image::load_from_memory(jpeg_data).ok()?;
+    let img = apply_orientation(img, orientation);
+    let rgba = img.to_rgba8();
+
+    Some(DecodedImage {
+        width: rgba.width(),
+        height: rgba.height(),
+        pixels: rgba.into_raw(),
+    })
+}
+
+/// Check whether a file path has a raw camera format extension.
+pub fn is_raw_extension(path: &Path) -> bool {
+    match path.extension().and_then(|e| e.to_str()) {
+        Some(ext) => matches!(
+            ext.to_ascii_lowercase().as_str(),
+            "dng" | "cr2" | "cr3" | "nef" | "arw" | "orf" | "rw2" | "raf"
+        ),
+        None => false,
+    }
 }
 
 /// Tier 1: Full image decode + downscale to thumbnail.

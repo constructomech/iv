@@ -71,6 +71,15 @@ fn io_read_embedded_smart(
                 // HEIC: libheif needs a well-formed file to decode HEVC thumbnails.
                 // A truncated mdat causes green corruption. Read the full file.
                 std::fs::read(path).ok()
+            } else if offset == 0 {
+                // TIFF/DNG: read from file start, reusing already-read probe bytes
+                let mut buf = vec![0u8; length];
+                let reuse = probe_len.min(length);
+                buf[..reuse].copy_from_slice(&probe[..reuse]);
+                if reuse < length {
+                    file.read_exact(&mut buf[reuse..]).ok()?;
+                }
+                Some(buf)
             } else {
                 // Other formats: targeted read at exact offset
                 let mut buf = vec![0u8; length];

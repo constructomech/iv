@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::sync::mpsc;
 use std::thread;
 
-use crate::app::{DecodedImage, fit_size, load_image};
+use crate::app::{DecodedImage, load_image};
 
 /// Full-resolution image viewer with zoom, pan, and navigation.
 pub struct ImageView {
@@ -204,8 +204,9 @@ impl ImageView {
         let tex_info = self.texture.as_ref().map(|t| (t.id(), t.size_vec2()));
 
         if let Some((tex_id, tex_size)) = tex_info {
-            // Compute display size
-            let (fit_w, fit_h) = fit_size((tex_size.x, tex_size.y), (available.x, available.y));
+            // Compute display size — scale to fill viewport, allowing upscale
+            let scale = (available.x / tex_size.x).min(available.y / tex_size.y);
+            let (fit_w, fit_h) = (tex_size.x * scale, tex_size.y * scale);
 
             let (display_w, display_h) = if self.fit_mode {
                 (fit_w, fit_h)
