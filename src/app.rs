@@ -17,25 +17,51 @@ pub struct DecodedImage {
 
 /// Load an image file from disk and decode it to RGBA, applying EXIF orientation.
 /// For HEIC/HEIF, libheif applies orientation internally, so we skip it.
-/// For raw files (DNG, CR2, NEF, etc.), extracts the largest embedded JPEG preview.
+/// For raw files (DNG, CR2, NEF, etc.), uses LibRaw for full-resolution demosaicing,
+/// falling back to the embedded JPEG preview.
 pub fn load_image(path: &Path) -> Result<DecodedImage, String> {
     let data =
         std::fs::read(path).map_err(|e| format!("Failed to read {}: {e}", path.display()))?;
 
-    // Raw files: extract the largest embedded JPEG preview from the TIFF structure.
-    // image::load_from_memory on raw TIFF often returns a tiny IFD1 thumbnail.
-    if crate::decode::is_raw_extension(path)
-        && let Some(decoded) = crate::decode::load_raw_preview(&data)
-    {
-        return Ok(decoded);
+    // Raw files: full-resolution decode via LibRaw (demosaic + white balance).
+    // Falls back to the largest embedded JPEG preview if LibRaw fails.
+    if crate::decode::is_raw_extension(path) {
+        if let Some(decoded) = crate::decode::decode_raw_libraw(&data) {
+            return Ok(decoded);
+        }
+        if let Some(decoded) = crate::decode::load_raw_preview(&data) {
+            return Ok(decoded);
+        }
     }
 
-    let img = image::load_from_memory(&data)
+    load_image_standard(&data, path)
+}
+
+/// Fast preview for raw files: extract the embedded JPEG preview (~8ms)
+/// without doing full demosaicing. Used for progressive loading.
+pub fn load_raw_preview_image(path: &Path) -> Result<DecodedImage, String> {
+    let data =
+        std::fs::read(path).map_err(|e| format!("Failed to read {}: {e}", path.display()))?;
+    if let Some(decoded) = crate::decode::load_raw_preview(&data) {
+        return Ok(decoded);
+    }
+    load_image_standard(&data, path)
+}
+
+/// Full-resolution raw decode via LibRaw. Returns None for non-raw formats.
+pub fn load_raw_full(path: &Path) -> Option<DecodedImage> {
+    let data = std::fs::read(path).ok()?;
+    crate::decode::decode_raw_libraw(&data)
+}
+
+/// Standard image decode path (non-raw or raw fallback).
+fn load_image_standard(data: &[u8], path: &Path) -> Result<DecodedImage, String> {
+    let img = image::load_from_memory(data)
         .map_err(|e| format!("Failed to decode {}: {e}", path.display()))?;
     // libheif applies orientation during decode for HEIC/HEIF,
     // so only apply manual orientation for other formats.
     let img = if !crate::decode::is_heif_extension(path) {
-        let orientation = crate::decode::read_exif_orientation(&data);
+        let orientation = crate::decode::read_exif_orientation(data);
         crate::decode::apply_orientation(img, orientation)
     } else {
         img

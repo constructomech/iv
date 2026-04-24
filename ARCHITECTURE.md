@@ -207,14 +207,28 @@ parses the orientation tag (values 1–8) and `apply_orientation()` performs
 the corresponding rotation/mirror transform. For TIFF-based files, the
 custom IFD parser reads orientation directly from tag 0x0112.
 
-### Full-Resolution Raw Preview
+### Full-Resolution Raw Decode (LibRaw)
 
-When opening a raw file (DNG, CR2, NEF, etc.) in full-size image view,
-`load_raw_preview()` parses the TIFF IFD structure to find the *largest*
-embedded JPEG preview and decodes that. This is typically the IFD0 JPEG
-preview (1024–1600px wide), much larger than the IFD1 thumbnail used for
-grid view. Falls back to `image::load_from_memory()` if no embedded JPEG
-is found.
+When opening a raw file (DNG, CR2, NEF, ARW, etc.) in full-size image view,
+`decode_raw_libraw()` decodes the full sensor data via LibRaw:
+
+1. `libraw_open_buffer` → parse raw file structure
+2. `libraw_unpack` → decompress sensor data
+3. `libraw_dcraw_process` → demosaic, white balance, color space conversion
+4. `libraw_dcraw_make_mem_image` → produce 8-bit sRGB bitmap
+
+LibRaw handles EXIF orientation internally, so no manual rotation is needed.
+The output is full sensor resolution (e.g. 6000×4000 for 24MP).
+
+A thin C wrapper (`src/libraw_wrapper.c`) encapsulates the full pipeline
+in one function call, avoiding any Rust dependency on LibRaw's complex
+`libraw_data_t` struct layout. LibRaw and its transitive dependencies
+(lcms2, zlib, jasper, jpeg) are installed via vcpkg and linked statically.
+
+If LibRaw fails, the viewer falls back to `load_raw_preview()` which
+extracts the largest embedded JPEG preview from the TIFF IFD structure
+(typically 1024–1600px). This is also used for grid thumbnails since it
+only requires reading file headers, not full sensor decode.
 
 ## Row-Based Virtualization
 

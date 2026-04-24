@@ -2,8 +2,13 @@ use eframe::egui;
 use std::path::PathBuf;
 use std::sync::mpsc;
 use std::thread;
+use std::time::Instant;
 
-use crate::app::{DecodedImage, load_image};
+use crate::app::{DecodedImage, load_image, load_raw_full, load_raw_preview_image};
+use crate::decode::is_raw_extension;
+
+/// Duration of the crossfade from preview to full-res (seconds).
+const CROSSFADE_DURATION: f32 = 0.3;
 
 /// Full-resolution image viewer with zoom, pan, and navigation.
 pub struct ImageView {
@@ -11,8 +16,12 @@ pub struct ImageView {
     paths: Vec<PathBuf>,
     /// Current image index into `paths`.
     current: usize,
-    /// Currently displayed texture.
+    /// Currently displayed texture (or full-res after upgrade).
     texture: Option<egui::TextureHandle>,
+    /// Preview texture kept alive during crossfade.
+    preview_texture: Option<egui::TextureHandle>,
+    /// When the crossfade started (None if not crossfading).
+    crossfade_start: Option<Instant>,
     /// Error message for the current image.
     error: Option<String>,
     /// Zoom level (1.0 = fit to window).
@@ -23,6 +32,10 @@ pub struct ImageView {
     fit_mode: bool,
     /// Background loader for the current image.
     loader: Option<mpsc::Receiver<Result<DecodedImage, String>>>,
+    /// Whether a full-res upgrade is pending (progressive raw loading).
+    upgrade_pending: bool,
+    /// Background loader for full-res raw upgrade.
+    upgrade_loader: Option<mpsc::Receiver<Option<DecodedImage>>>,
 }
 
 impl ImageView {
@@ -31,28 +44,63 @@ impl ImageView {
             paths,
             current: start_index,
             texture: None,
+            preview_texture: None,
+            crossfade_start: None,
             error: None,
             zoom: 1.0,
             pan: egui::Vec2::ZERO,
             fit_mode: true,
             loader: None,
+            upgrade_pending: false,
+            upgrade_loader: None,
         };
         view.start_loading(start_index);
         view
     }
 
     /// Start loading an image on a background thread.
+    /// For raw files, loads the fast preview first, then kicks off LibRaw upgrade.
     fn start_loading(&mut self, index: usize) {
         if index >= self.paths.len() {
             return;
         }
 
         let path = self.paths[index].clone();
+        let is_raw = is_raw_extension(&path);
         let (tx, rx) = mpsc::channel();
         self.loader = Some(rx);
+        self.upgrade_pending = is_raw;
+        self.upgrade_loader = None;
+        self.preview_texture = None;
+        self.crossfade_start = None;
+
+        if is_raw {
+            // Phase 1: fast embedded JPEG preview (~8ms)
+            thread::spawn(move || {
+                let result = load_raw_preview_image(&path);
+                let _ = tx.send(result);
+            });
+        } else {
+            thread::spawn(move || {
+                let result = load_image(&path);
+                let _ = tx.send(result);
+            });
+        }
+    }
+
+    /// Start the full-res LibRaw decode after the preview is displayed.
+    fn start_raw_upgrade(&mut self) {
+        if !self.upgrade_pending {
+            return;
+        }
+        let Some(path) = self.paths.get(self.current).cloned() else {
+            return;
+        };
+        let (tx, rx) = mpsc::channel();
+        self.upgrade_loader = Some(rx);
 
         thread::spawn(move || {
-            let result = load_image(&path);
+            let result = load_raw_full(&path);
             let _ = tx.send(result);
         });
     }
@@ -73,6 +121,7 @@ impl ImageView {
 
     /// Poll the background loader for results.
     fn poll_loader(&mut self, ctx: &egui::Context) {
+        // Poll primary loader (fast preview or standard decode)
         if let Some(ref rx) = self.loader {
             match rx.try_recv() {
                 Ok(Ok(decoded)) => {
@@ -88,6 +137,8 @@ impl ImageView {
                     self.loader = None;
                     self.reset_view();
                     self.preload_adjacent();
+                    // For raw files, kick off the full-res upgrade
+                    self.start_raw_upgrade();
                 }
                 Ok(Err(e)) => {
                     self.error = Some(e);
@@ -105,6 +156,39 @@ impl ImageView {
                 }
             }
         }
+
+        // Poll raw upgrade loader (full-res LibRaw result)
+        if let Some(ref rx) = self.upgrade_loader {
+            match rx.try_recv() {
+                Ok(Some(decoded)) => {
+                    let size = [decoded.width as usize, decoded.height as usize];
+                    let color_image =
+                        egui::ColorImage::from_rgba_unmultiplied(size, &decoded.pixels);
+                    // Move old preview to crossfade layer
+                    self.preview_texture = self.texture.take();
+                    self.texture = Some(ctx.load_texture(
+                        format!("full_hires_{}", self.current),
+                        color_image,
+                        egui::TextureOptions::LINEAR,
+                    ));
+                    self.crossfade_start = Some(Instant::now());
+                    self.upgrade_loader = None;
+                    self.upgrade_pending = false;
+                }
+                Ok(None) => {
+                    // LibRaw failed — keep the preview
+                    self.upgrade_loader = None;
+                    self.upgrade_pending = false;
+                }
+                Err(mpsc::TryRecvError::Empty) => {
+                    ctx.request_repaint();
+                }
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    self.upgrade_loader = None;
+                    self.upgrade_pending = false;
+                }
+            }
+        }
     }
 
     /// Navigate to a different image.
@@ -114,12 +198,14 @@ impl ImageView {
         }
         self.current = index;
         self.texture = None;
+        self.preview_texture = None;
+        self.crossfade_start = None;
         self.error = None;
         self.loader = None;
+        self.upgrade_loader = None;
+        self.upgrade_pending = false;
         self.reset_view();
 
-        self.loader = None;
-        self.reset_view();
         self.start_loading(index);
     }
 
@@ -203,6 +289,28 @@ impl ImageView {
         // Extract texture info before mutable borrows
         let tex_info = self.texture.as_ref().map(|t| (t.id(), t.size_vec2()));
 
+        // Compute crossfade progress (0.0 = all preview, 1.0 = all full-res)
+        let crossfade_t = self.crossfade_start.map(|start| {
+            let elapsed = start.elapsed().as_secs_f32();
+            (elapsed / CROSSFADE_DURATION).min(1.0)
+        });
+
+        // Clean up crossfade when complete
+        if crossfade_t == Some(1.0) {
+            self.preview_texture = None;
+            self.crossfade_start = None;
+        }
+
+        // Request repaints during crossfade animation
+        if crossfade_t.is_some_and(|t| t < 1.0) {
+            ctx.request_repaint();
+        }
+
+        let preview_info = self
+            .preview_texture
+            .as_ref()
+            .map(|t| (t.id(), t.size_vec2()));
+
         if let Some((tex_id, tex_size)) = tex_info {
             // Compute display size — scale to fill viewport, allowing upscale
             let scale = (available.x / tex_size.x).min(available.y / tex_size.y);
@@ -248,13 +356,34 @@ impl ImageView {
                 ui.min_rect().min.y + available.y / 2.0 + self.pan.y,
             );
             let img_rect = egui::Rect::from_center_size(center, egui::vec2(display_w, display_h));
+            let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
 
-            ui.painter().image(
-                tex_id,
-                img_rect,
-                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                egui::Color32::WHITE,
-            );
+            if let (Some(t), Some((preview_id, _))) = (crossfade_t, preview_info) {
+                // Crossfading: draw preview at (1-t) alpha, then full-res at t alpha
+                // Use smooth ease-in-out for perceptually pleasant transition
+                let t_smooth = t * t * (3.0 - 2.0 * t); // smoothstep
+                let preview_alpha = ((1.0 - t_smooth) * 255.0) as u8;
+                let full_alpha = (t_smooth * 255.0) as u8;
+
+                // Preview layer (fading out)
+                ui.painter().image(
+                    preview_id,
+                    img_rect,
+                    uv,
+                    egui::Color32::from_rgba_unmultiplied(255, 255, 255, preview_alpha),
+                );
+                // Full-res layer (fading in)
+                ui.painter().image(
+                    tex_id,
+                    img_rect,
+                    uv,
+                    egui::Color32::from_rgba_unmultiplied(255, 255, 255, full_alpha),
+                );
+            } else {
+                // Normal display — single texture at full alpha
+                ui.painter()
+                    .image(tex_id, img_rect, uv, egui::Color32::WHITE);
+            }
         } else {
             ui.centered_and_justified(|ui| {
                 ui.spinner();

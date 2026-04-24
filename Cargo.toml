@@ -29,6 +29,9 @@ env_logger = "0.11"
 rust-i18n = "3"
 libheif-rs = { version = "2.7", default-features = false, features = ["image", "v1_17"] }
 
+[build-dependencies]
+cc = "1"
+
 [dev-dependencies]
 tempfile = "3"
 
@@ -40,7 +43,7 @@ opt-level = 2
 [package.metadata.vcpkg]
 git = "https://github.com/microsoft/vcpkg"
 rev = "2026.01.16"
-install = ["libheif[core,aom]"]
+install = ["libheif[core,aom]", "libraw"]
 
 [package.metadata.vcpkg.target]
 x86_64-pc-windows-msvc = { triplet = "x64-windows-static-md" }

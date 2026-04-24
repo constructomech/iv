@@ -499,14 +499,82 @@ fn find_tiff_jpegs(data: &[u8]) -> Option<(Vec<TiffJpeg>, u32)> {
     Some((jpegs, orientation))
 }
 
+/// Check if a TIFF header has SubIFD pointers that reference data beyond
+/// the current buffer. Returns the minimum read length needed to cover
+/// the SubIFD entries and a reasonable margin for their JPEG data.
+fn tiff_needs_longer_read(header: &[u8]) -> Option<usize> {
+    if header.len() < 8 {
+        return None;
+    }
+    let le = header[0] == b'I';
+    let magic = tiff_u16(header, 2, le)?;
+    if magic != 42 {
+        return None;
+    }
+    let ifd0_off = tiff_u32(header, 4, le)? as usize;
+    if ifd0_off >= header.len() {
+        return None;
+    }
+    let count = tiff_u16(header, ifd0_off, le)? as usize;
+    if ifd0_off + 2 + count * 12 + 4 > header.len() {
+        return None;
+    }
+
+    let mut max_sub_off: usize = 0;
+    for i in 0..count {
+        let e = ifd0_off + 2 + i * 12;
+        let tag = tiff_u16(header, e, le)?;
+        if tag == 0x014A {
+            // SubIFDs tag
+            let fcount = tiff_u32(header, e + 4, le)? as usize;
+            let value_off = e + 8;
+            if fcount == 1 {
+                let off = tiff_u32(header, value_off, le)? as usize;
+                max_sub_off = max_sub_off.max(off);
+            } else {
+                let arr_off = tiff_u32(header, value_off, le)? as usize;
+                for j in 0..fcount {
+                    if let Some(off) = tiff_u32(header, arr_off + j * 4, le) {
+                        max_sub_off = max_sub_off.max(off as usize);
+                    }
+                }
+            }
+        }
+    }
+
+    if max_sub_off > header.len() {
+        // SubIFD data is beyond probe. Request enough to cover SubIFD entries
+        // plus generous margin for the JPEG data they reference.
+        // DNG SubIFDs are typically followed by their JPEG data within ~200KB.
+        Some(max_sub_off + 256 * 1024)
+    } else {
+        None
+    }
+}
+
 /// TIFF probe: parse IFD structure to locate embedded JPEG thumbnail.
 /// DNG, CR2, NEF, ARW, etc. are all TIFF-based with JPEG thumbnails.
 fn probe_tiff(header: &[u8]) -> ProbeResult {
     let Some((jpegs, _)) = find_tiff_jpegs(header) else {
+        // IFD parsing failed — but the SubIFD data might be beyond our probe.
+        // Check if SubIFD offsets exist within the probe but point beyond it.
+        if let Some(need) = tiff_needs_longer_read(header) {
+            return ProbeResult::NeedsRead {
+                offset: 0,
+                length: need,
+            };
+        }
         return ProbeResult::Inconclusive;
     };
 
     if jpegs.is_empty() {
+        // No JPEGs found in parseable IFDs — check if SubIFDs were unreachable
+        if let Some(need) = tiff_needs_longer_read(header) {
+            return ProbeResult::NeedsRead {
+                offset: 0,
+                length: need,
+            };
+        }
         return ProbeResult::NoThumbnail;
     }
 
@@ -911,6 +979,95 @@ pub fn is_raw_extension(path: &Path) -> bool {
         ),
         None => false,
     }
+}
+
+// ---------------------------------------------------------------------------
+// LibRaw full-resolution raw decode (via C wrapper)
+// ---------------------------------------------------------------------------
+
+// iv_libraw: our C wrapper (compiled by build.rs).
+// raw_r, lcms2, zlib, jasper, jpeg: LibRaw's transitive dependencies from vcpkg.
+#[link(name = "iv_libraw", kind = "static")]
+unsafe extern "C" {
+    fn iv_libraw_decode_buffer(
+        data: *const u8,
+        len: usize,
+        out_data: *mut *mut u8,
+        out_width: *mut i32,
+        out_height: *mut i32,
+        out_colors: *mut i32,
+        out_data_size: *mut u32,
+    ) -> i32;
+
+    fn iv_libraw_free(ptr: *mut u8);
+}
+
+#[link(name = "raw_r", kind = "static")]
+unsafe extern "C" {}
+
+#[link(name = "lcms2", kind = "static")]
+unsafe extern "C" {}
+
+#[link(name = "zlib", kind = "static")]
+unsafe extern "C" {}
+
+#[link(name = "jasper", kind = "static")]
+unsafe extern "C" {}
+
+#[link(name = "jpeg", kind = "static")]
+unsafe extern "C" {}
+
+/// Decode a raw camera file to full-resolution RGBA using LibRaw.
+/// LibRaw handles demosaicing, white balance, and EXIF orientation internally.
+pub fn decode_raw_libraw(data: &[u8]) -> Option<DecodedImage> {
+    let mut out_data: *mut u8 = std::ptr::null_mut();
+    let mut width: i32 = 0;
+    let mut height: i32 = 0;
+    let mut colors: i32 = 0;
+    let mut data_size: u32 = 0;
+
+    let ret = unsafe {
+        iv_libraw_decode_buffer(
+            data.as_ptr(),
+            data.len(),
+            &mut out_data,
+            &mut width,
+            &mut height,
+            &mut colors,
+            &mut data_size,
+        )
+    };
+
+    if ret != 0 || out_data.is_null() || width <= 0 || height <= 0 {
+        if !out_data.is_null() {
+            unsafe { iv_libraw_free(out_data) };
+        }
+        return None;
+    }
+
+    let w = width as usize;
+    let h = height as usize;
+    let c = colors as usize;
+    let src = unsafe { std::slice::from_raw_parts(out_data, data_size as usize) };
+
+    // Convert RGB (3 channels) → RGBA (4 channels)
+    let pixel_count = w * h;
+    let mut rgba = Vec::with_capacity(pixel_count * 4);
+    for i in 0..pixel_count {
+        let off = i * c;
+        rgba.push(src[off]);
+        rgba.push(src[off + 1]);
+        rgba.push(src[off + 2]);
+        rgba.push(255);
+    }
+
+    unsafe { iv_libraw_free(out_data) };
+
+    Some(DecodedImage {
+        width: w as u32,
+        height: h as u32,
+        pixels: rgba,
+    })
 }
 
 /// Tier 1: Full image decode + downscale to thumbnail.
