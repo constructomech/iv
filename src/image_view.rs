@@ -36,6 +36,8 @@ pub struct ImageView {
     upgrade_pending: bool,
     /// Background loader for full-res raw upgrade.
     upgrade_loader: Option<mpsc::Receiver<Option<DecodedImage>>>,
+    /// Viewport size at last layout (for resolution-aware upgrade decision).
+    last_viewport: egui::Vec2,
 }
 
 impl ImageView {
@@ -53,6 +55,7 @@ impl ImageView {
             loader: None,
             upgrade_pending: false,
             upgrade_loader: None,
+            last_viewport: egui::Vec2::ZERO,
         };
         view.start_loading(start_index);
         view
@@ -89,10 +92,26 @@ impl ImageView {
     }
 
     /// Start the full-res LibRaw decode after the preview is displayed.
+    /// Skips the upgrade if the preview already covers the viewport.
     fn start_raw_upgrade(&mut self) {
         if !self.upgrade_pending {
             return;
         }
+
+        // Check if the preview already has enough resolution for the viewport
+        if let Some(ref tex) = self.texture {
+            let tex_size = tex.size_vec2();
+            if !crate::decode::needs_upscale(
+                tex_size.x as u32,
+                tex_size.y as u32,
+                self.last_viewport.x,
+                self.last_viewport.y,
+            ) {
+                self.upgrade_pending = false;
+                return;
+            }
+        }
+
         let Some(path) = self.paths.get(self.current).cloned() else {
             return;
         };
@@ -278,6 +297,7 @@ impl ImageView {
 
         // Image display area
         let available = ui.available_size();
+        self.last_viewport = available;
 
         if let Some(ref error) = self.error {
             ui.centered_and_justified(|ui| {

@@ -123,6 +123,10 @@ enum WorkTier {
     EmbeddedOnly,
     /// Full file decode + downscale. Slow, reads entire file.
     FullDecode,
+    /// Resolution upgrade for undersized thumbnails. Lowest priority.
+    /// Raw files: extract larger embedded JPEG preview.
+    /// Other formats: full decode + downscale to tile size.
+    Upscale,
 }
 
 /// A decode request sent from the I/O pool to the decode pool.
@@ -134,6 +138,8 @@ struct DecodeRequest {
     generation: u64,
     tier: WorkTier,
     is_heif: bool,
+    /// Target decode size (pixels). Used by Upscale tier.
+    target_size: u32,
 }
 
 /// A completed result from a decode worker.
@@ -152,6 +158,12 @@ enum WorkResult {
     },
     /// Full decode completed.
     FullOk {
+        idx: usize,
+        image: DecodedImage,
+        ms: f64,
+    },
+    /// Upscale decode completed.
+    UpscaleOk {
         idx: usize,
         image: DecodedImage,
         ms: f64,
@@ -185,6 +197,10 @@ pub struct GridView {
     tile_size: f32,
     /// GPU textures, indexed same as grid tiles.
     textures: Vec<Option<egui::TextureHandle>>,
+    /// Decoded image dimensions per tile (for resolution-aware upscale).
+    decoded_sizes: Vec<Option<(u32, u32)>>,
+    /// Indices of tiles with in-flight upscale decodes.
+    upgrading: std::collections::HashSet<usize>,
     /// Per-tile timing data for debug overlay.
     timings: Vec<TileTiming>,
     /// Cached file bytes from HEIC embedded extraction (avoids re-read for full decode).
@@ -271,8 +287,11 @@ impl GridView {
                                 }
                             }
                             WorkTier::FullDecode => {
-                                let result =
-                                    decode::decode_from_bytes(&req.data, THUMB_SIZE, req.is_heif);
+                                let result = decode::decode_from_bytes(
+                                    &req.data,
+                                    req.target_size,
+                                    req.is_heif,
+                                );
                                 let ms = start.elapsed().as_secs_f64() * 1000.0;
                                 match result {
                                     Ok((image, _)) => {
@@ -283,6 +302,28 @@ impl GridView {
                                         });
                                     }
                                     Err(_) => {
+                                        let _ = result_tx.send(WorkResult::Failed { idx: req.idx });
+                                    }
+                                }
+                            }
+                            WorkTier::Upscale => {
+                                let is_raw = decode::is_raw_extension(&req.path);
+                                let result = decode::decode_for_upscale(
+                                    &req.data,
+                                    req.target_size,
+                                    is_raw,
+                                    req.is_heif,
+                                );
+                                let ms = start.elapsed().as_secs_f64() * 1000.0;
+                                match result {
+                                    Some(image) => {
+                                        let _ = result_tx.send(WorkResult::UpscaleOk {
+                                            idx: req.idx,
+                                            image,
+                                            ms,
+                                        });
+                                    }
+                                    None => {
                                         let _ = result_tx.send(WorkResult::Failed { idx: req.idx });
                                     }
                                 }
@@ -299,6 +340,8 @@ impl GridView {
             grid,
             debug: debug_mode(),
             textures: Vec::new(),
+            decoded_sizes: Vec::new(),
+            upgrading: std::collections::HashSet::new(),
             timings: Vec::new(),
             cached_data: Vec::new(),
             io_runtime,
@@ -336,6 +379,9 @@ impl GridView {
         while self.textures.len() <= idx {
             self.textures.push(None);
         }
+        while self.decoded_sizes.len() <= idx {
+            self.decoded_sizes.push(None);
+        }
         while self.timings.len() <= idx {
             self.timings.push(TileTiming::default());
         }
@@ -361,6 +407,7 @@ impl GridView {
                     if idx < self.grid.tile_count() {
                         self.ensure_vecs(idx);
                         let size = [image.width as usize, image.height as usize];
+                        self.decoded_sizes[idx] = Some((image.width, image.height));
                         let ci = egui::ColorImage::from_rgba_unmultiplied(size, &image.pixels);
                         self.textures[idx] = Some(ctx.load_texture(
                             format!("t{idx}"),
@@ -395,6 +442,7 @@ impl GridView {
                     if idx < self.grid.tile_count() {
                         self.ensure_vecs(idx);
                         let size = [image.width as usize, image.height as usize];
+                        self.decoded_sizes[idx] = Some((image.width, image.height));
                         let ci = egui::ColorImage::from_rgba_unmultiplied(size, &image.pixels);
                         self.textures[idx] = Some(ctx.load_texture(
                             format!("t{idx}"),
@@ -413,10 +461,30 @@ impl GridView {
                 WorkResult::Failed { idx } => {
                     if idx < self.grid.tile_count() {
                         self.ensure_vecs(idx);
+                        self.upgrading.remove(&idx);
                         self.grid.record_event(GridEventKind::ResultReceived {
                             idx,
                             kind: "failed".into(),
                             ms: 0.0,
+                        });
+                    }
+                }
+                WorkResult::UpscaleOk { idx, image, ms } => {
+                    if idx < self.grid.tile_count() {
+                        self.ensure_vecs(idx);
+                        let size = [image.width as usize, image.height as usize];
+                        self.decoded_sizes[idx] = Some((image.width, image.height));
+                        let ci = egui::ColorImage::from_rgba_unmultiplied(size, &image.pixels);
+                        self.textures[idx] = Some(ctx.load_texture(
+                            format!("t{idx}"),
+                            ci,
+                            egui::TextureOptions::LINEAR,
+                        ));
+                        self.upgrading.remove(&idx);
+                        self.grid.record_event(GridEventKind::ResultReceived {
+                            idx,
+                            kind: "upscale_ok".into(),
+                            ms,
                         });
                     }
                 }
@@ -427,10 +495,11 @@ impl GridView {
 
     // -- Scheduling ---------------------------------------------------------
 
-    /// Three-phase scheduling:
+    /// Four-phase scheduling:
     /// 1. All visible NotLoaded tiles → EmbeddedOnly (highest priority)
     /// 2. All visible EmbeddedMissed tiles → FullDecode
-    /// 3. Off-screen NotLoaded tiles → EmbeddedOnly (preloading, nearest first)
+    /// 3. Visible Loaded tiles with undersized thumbnails → Upscale
+    /// 4. Off-screen NotLoaded tiles → EmbeddedOnly (preloading, nearest first)
     ///
     /// I/O is dispatched to tokio's blocking pool; decoded bytes flow to decode workers.
     /// Stops scheduling if the frame time budget is exceeded.
@@ -451,7 +520,14 @@ impl GridView {
                 }
                 self.grid.set_tile_state(idx, TileState::LoadingEmbedded);
                 let is_heif = decode::is_heif_extension(&path);
-                self.spawn_io_read(idx, path, current_gen, WorkTier::EmbeddedOnly, is_heif);
+                self.spawn_io_read(
+                    idx,
+                    path,
+                    current_gen,
+                    WorkTier::EmbeddedOnly,
+                    is_heif,
+                    THUMB_SIZE,
+                );
                 scheduled_indices.push(idx);
             }
             if !scheduled_indices.is_empty() {
@@ -490,9 +566,17 @@ impl GridView {
                         generation: current_gen,
                         tier: WorkTier::FullDecode,
                         is_heif,
+                        target_size: THUMB_SIZE,
                     });
                 } else {
-                    self.spawn_io_read(idx, path, current_gen, WorkTier::FullDecode, is_heif);
+                    self.spawn_io_read(
+                        idx,
+                        path,
+                        current_gen,
+                        WorkTier::FullDecode,
+                        is_heif,
+                        THUMB_SIZE,
+                    );
                 }
                 scheduled_indices.push(idx);
             }
@@ -505,12 +589,62 @@ impl GridView {
             return;
         }
 
-        // Phase 3: preload off-screen NotLoaded tiles (nearest to viewport first)
+        // Phase 3: upscale visible tiles with undersized thumbnails
+        if std::time::Instant::now() < *deadline {
+            self.schedule_upscales(current_gen, deadline);
+        }
+
+        // Phase 4: preload off-screen NotLoaded tiles (nearest to viewport first)
         // Only runs when all visible tiles are in-flight or loaded.
         if std::time::Instant::now() >= *deadline {
             return;
         }
         self.schedule_offscreen_embedded(current_gen, deadline);
+    }
+
+    /// Schedule upscale decodes for visible tiles whose thumbnails are
+    /// smaller than the current tile display size.
+    fn schedule_upscales(&mut self, current_gen: u64, deadline: &std::time::Instant) {
+        let tile_w = self.grid.config().tile_width;
+        let tile_h = self.grid.config().tile_height;
+        let visible = self.grid.visible_in_state(TileState::Loaded);
+
+        let mut scheduled_indices = Vec::new();
+        for idx in visible {
+            if std::time::Instant::now() >= *deadline {
+                break;
+            }
+            if self.upgrading.contains(&idx) {
+                continue;
+            }
+            let Some(&Some((dw, dh))) = self.decoded_sizes.get(idx) else {
+                continue;
+            };
+            if !decode::needs_upscale(dw, dh, tile_w, tile_h) {
+                continue;
+            }
+            let path = self.grid.tile_path(idx).to_path_buf();
+            if path.as_os_str().is_empty() {
+                continue;
+            }
+            self.upgrading.insert(idx);
+            let is_heif = decode::is_heif_extension(&path);
+            self.spawn_io_read(
+                idx,
+                path,
+                current_gen,
+                WorkTier::Upscale,
+                is_heif,
+                tile_w as u32,
+            );
+            scheduled_indices.push(idx);
+        }
+        if !scheduled_indices.is_empty() {
+            self.grid.record_event(GridEventKind::WorkScheduled {
+                indices: scheduled_indices,
+                tier: "upscale".into(),
+            });
+        }
     }
 
     /// Schedule embedded thumbnail extraction for off-screen tiles,
@@ -547,6 +681,7 @@ impl GridView {
                             current_gen,
                             WorkTier::EmbeddedOnly,
                             is_heif,
+                            THUMB_SIZE,
                         );
                         scheduled_count += 1;
                         found = true;
@@ -571,6 +706,7 @@ impl GridView {
                             current_gen,
                             WorkTier::EmbeddedOnly,
                             is_heif,
+                            THUMB_SIZE,
                         );
                         scheduled_count += 1;
                         found = true;
@@ -598,6 +734,7 @@ impl GridView {
         generation: u64,
         tier: WorkTier,
         is_heif: bool,
+        target_size: u32,
     ) {
         let decode_tx = self.decode_tx.clone();
         let gen_counter = self.generation.clone();
@@ -610,8 +747,8 @@ impl GridView {
                 WorkTier::EmbeddedOnly => {
                     io_read_embedded_smart(&path, &gen_counter, generation, is_heif)
                 }
-                WorkTier::FullDecode => {
-                    // Full decode always needs the entire file
+                WorkTier::FullDecode | WorkTier::Upscale => {
+                    // Full decode / upscale always needs the entire file
                     std::fs::read(&path).ok()
                 }
             };
@@ -627,6 +764,7 @@ impl GridView {
                 generation,
                 tier,
                 is_heif,
+                target_size,
             });
         });
     }
@@ -641,6 +779,7 @@ impl GridView {
             let new_gen = self.generation.fetch_add(1, Ordering::Relaxed) + 1;
             // Drain pending decode requests (I/O tasks check generation before sending)
             while self.decode_rx.try_recv().is_ok() {}
+            self.upgrading.clear();
             let mut reset_count = 0;
             for idx in 0..self.grid.tile_count() {
                 match self.grid.tile_state(idx) {

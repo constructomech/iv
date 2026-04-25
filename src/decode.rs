@@ -424,8 +424,10 @@ fn parse_tiff_ifd(data: &[u8], ifd_off: usize, le: bool) -> Option<TiffIfdInfo> 
             length: len as u64,
         }),
         _ => {
-            // StripOffsets/StripByteCounts with Compression=7 (JPEG)
-            if compression == Some(7) {
+            // StripOffsets/StripByteCounts with JPEG compression
+            // Compression 6 = old-style JPEG (Canon CR2 IFD0)
+            // Compression 7 = new-style JPEG (DNG IFD0)
+            if matches!(compression, Some(6) | Some(7)) {
                 match (strip_offset, strip_length) {
                     (Some(off), Some(len)) if len > 0 => Some(TiffJpeg {
                         offset: off as u64,
@@ -520,33 +522,42 @@ fn tiff_needs_longer_read(header: &[u8]) -> Option<usize> {
         return None;
     }
 
-    let mut max_sub_off: usize = 0;
+    let mut max_needed: usize = 0;
+
+    // Check SubIFD pointers (DNG, NEF, etc.)
     for i in 0..count {
         let e = ifd0_off + 2 + i * 12;
         let tag = tiff_u16(header, e, le)?;
         if tag == 0x014A {
-            // SubIFDs tag
             let fcount = tiff_u32(header, e + 4, le)? as usize;
             let value_off = e + 8;
             if fcount == 1 {
                 let off = tiff_u32(header, value_off, le)? as usize;
-                max_sub_off = max_sub_off.max(off);
+                max_needed = max_needed.max(off);
             } else {
                 let arr_off = tiff_u32(header, value_off, le)? as usize;
                 for j in 0..fcount {
                     if let Some(off) = tiff_u32(header, arr_off + j * 4, le) {
-                        max_sub_off = max_sub_off.max(off as usize);
+                        max_needed = max_needed.max(off as usize);
                     }
                 }
             }
         }
     }
 
-    if max_sub_off > header.len() {
-        // SubIFD data is beyond probe. Request enough to cover SubIFD entries
+    // Check next-IFD pointer (CR2 stores JPEG thumbnail in IFD1)
+    let next_ifd_off = ifd0_off + 2 + count * 12;
+    if next_ifd_off + 4 <= header.len() {
+        let next_ifd = tiff_u32(header, next_ifd_off, le).unwrap_or(0) as usize;
+        if next_ifd > 0 {
+            max_needed = max_needed.max(next_ifd);
+        }
+    }
+
+    if max_needed > header.len() {
+        // IFD data is beyond probe. Request enough to cover the IFD entries
         // plus generous margin for the JPEG data they reference.
-        // DNG SubIFDs are typically followed by their JPEG data within ~200KB.
-        Some(max_sub_off + 256 * 1024)
+        Some(max_needed + 256 * 1024)
     } else {
         None
     }
@@ -968,6 +979,46 @@ pub fn load_raw_preview(data: &[u8]) -> Option<DecodedImage> {
         height: rgba.height(),
         pixels: rgba.into_raw(),
     })
+}
+
+/// Check whether a decoded image needs a higher-resolution version for
+/// display at the given size. Returns true if either decoded dimension
+/// is smaller than the corresponding display dimension.
+pub fn needs_upscale(decoded_w: u32, decoded_h: u32, display_w: f32, display_h: f32) -> bool {
+    (decoded_w as f32) < display_w || (decoded_h as f32) < display_h
+}
+
+/// Decode a tile-upscale image from in-memory file bytes.
+/// For raw files: extracts the largest embedded JPEG preview (fast).
+/// For other formats: full decode + downscale to `target_size`.
+pub fn decode_for_upscale(
+    data: &[u8],
+    target_size: u32,
+    is_raw: bool,
+    is_heif: bool,
+) -> Option<DecodedImage> {
+    if is_raw {
+        // Use the embedded JPEG preview (much faster than LibRaw demosaic).
+        // This is typically 1024-1600px which is more than enough for grid tiles.
+        let mut img = load_raw_preview(data)?;
+        // Downscale if the preview is much larger than needed
+        if img.width > target_size * 2 || img.height > target_size * 2 {
+            let dyn_img = image::RgbaImage::from_raw(img.width, img.height, img.pixels)?;
+            let thumb =
+                image::DynamicImage::ImageRgba8(dyn_img).thumbnail(target_size, target_size);
+            let rgba = thumb.to_rgba8();
+            img = DecodedImage {
+                width: rgba.width(),
+                height: rgba.height(),
+                pixels: rgba.into_raw(),
+            };
+        }
+        Some(img)
+    } else {
+        // Standard format: full decode + downscale to target
+        let (img, _) = decode_from_bytes(data, target_size, is_heif).ok()?;
+        Some(img)
+    }
 }
 
 /// Check whether a file path has a raw camera format extension.
@@ -1463,5 +1514,48 @@ mod tests {
     fn exif_extract_nonexistent_returns_none() {
         let result = extract_exif_thumbnail(&[]);
         assert!(result.is_none());
+    }
+
+    // -- Resolution-aware upscale tests --
+
+    #[test]
+    fn needs_upscale_when_smaller() {
+        assert!(needs_upscale(160, 120, 275.0, 275.0));
+    }
+
+    #[test]
+    fn needs_upscale_when_one_dim_smaller() {
+        assert!(needs_upscale(300, 120, 275.0, 275.0));
+        assert!(needs_upscale(120, 300, 275.0, 275.0));
+    }
+
+    #[test]
+    fn no_upscale_when_equal() {
+        assert!(!needs_upscale(275, 275, 275.0, 275.0));
+    }
+
+    #[test]
+    fn no_upscale_when_larger() {
+        assert!(!needs_upscale(1024, 683, 275.0, 275.0));
+    }
+
+    #[test]
+    fn no_upscale_zero_display() {
+        assert!(!needs_upscale(160, 120, 0.0, 0.0));
+    }
+
+    #[test]
+    fn decode_for_upscale_jpeg() {
+        let dir = make_test_dir("upscale_jpeg");
+        let path = create_test_jpeg(&dir, "test.jpg", 800, 600);
+        let data = fs::read(&path).unwrap();
+
+        let result = decode_for_upscale(&data, 400, false, false);
+        assert!(result.is_some());
+        let img = result.unwrap();
+        assert!(img.width <= 400 && img.height <= 400);
+        assert!(img.width > 0 && img.height > 0);
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }

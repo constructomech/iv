@@ -78,14 +78,23 @@ Each tile progresses through these states:
                       │         │
                ┌──────▼──┐  ┌──▼───────────┐
                │ Loaded  │  │EmbeddedMissed│
-               └─────────┘  └──────┬───────┘
-                                   │ schedule_visible_work (Phase 2)
-                            ┌──────▼───────────┐
-                            │CreatingThumbnail │  ← worker: decode_from_bytes()
-                            └──────┬───────────┘
-                                   │
-                            ┌──────▼───┐
-                            │ Loaded   │
+               └────┬────┘  └──────┬───────┘
+                    │              │ schedule_visible_work (Phase 2)
+                    │       ┌──────▼───────────┐
+                    │       │CreatingThumbnail │  ← worker: decode_from_bytes()
+                    │       └──────┬───────────┘
+                    │              │
+                    │       ┌──────▼───┐
+                    └──────>│ Loaded   │
+                            └────┬─────┘
+                                 │ schedule_upscales (Phase 3)
+                                 │ (only if decoded size < tile display size)
+                            ┌────▼────────┐
+                            │  Upscaling  │  ← worker: decode_for_upscale()
+                            └────┬────────┘
+                                 │
+                            ┌────▼─────┐
+                            │ Loaded   │  (higher-res texture replaces old)
                             └──────────┘
 ```
 
@@ -107,24 +116,34 @@ Without this state, tiles that failed embedded extraction went directly to
 — producing duplicate work requests. The `EmbeddedMissed` state separates
 "waiting to be scheduled" from "worker is processing", preventing duplicates.
 
-## Two-Phase Scheduling
+## Four-Phase Scheduling
 
 `schedule_visible_work()` runs once per frame inside the `show()` method.
-It strictly prioritizes embedded extraction over full decode:
+It strictly prioritizes phases in order, using a frame-time deadline to
+avoid jank:
 
-**Phase 1**: Find visible tiles in `NotLoaded` state. Send up to 12 as
+**Phase 1**: Find visible tiles in `NotLoaded` state. Send as
 `EmbeddedOnly` work requests. Transition each to `LoadingEmbedded`.
 **Return early** — don't start Phase 2 until no visible `NotLoaded` tiles
 remain.
 
-**Phase 2**: Find visible tiles in `EmbeddedMissed` state. Send up to 12 as
+**Phase 2**: Find visible tiles in `EmbeddedMissed` state. Send as
 `FullDecode` work requests. Transition each to `CreatingThumbnail`.
 
+**Phase 3**: Find visible `Loaded` tiles whose decoded dimensions are
+smaller than the current tile display size (`needs_upscale()`). Send as
+`Upscale` work requests. For raw files, `decode_for_upscale()` extracts
+the larger embedded JPEG preview (typically 1024–1600px) without a full
+LibRaw demosaic. For standard formats, it does a full decode + downscale
+to tile size. The upgraded texture replaces the old one in-place.
+An `upgrading` set tracks in-flight upscale requests to prevent duplicates.
+
+**Phase 4**: Preload off-screen `NotLoaded` tiles as `EmbeddedOnly`,
+expanding outward from the visible range so nearby tiles load first.
+
 This ensures every visible tile shows *something* (even a low-res embedded
-thumbnail) before any expensive full decodes begin. On a typical viewport
-of 35 tiles where 80% have embedded thumbnails, all 28 will show within
-one round-trip (~200ms on network), and only the remaining 7 need full
-decode.
+thumbnail) before any expensive full decodes begin, and tiles that appear
+blurry at large tile sizes get silently upgraded in the background.
 
 ## Worker Threading Model
 
@@ -199,6 +218,21 @@ for HEIC), applies EXIF orientation, and downscales to 160×160 using
 
 **Typical timing**: 100–600ms depending on format and I/O. HEIC full
 decode is the slowest due to HEVC/AV1 decompression.
+
+### Resolution-Aware Upscale (Phase 3)
+
+When tiles are displayed larger than their decoded thumbnail (e.g. after
+window resize or with few files), `schedule_upscales()` re-decodes them at
+higher resolution. `decode_for_upscale()` chooses the fastest path:
+
+- **Raw files**: Extracts the largest embedded JPEG preview via
+  `load_raw_preview()` (fast — no demosaic). Downscales if the preview
+  exceeds 2× the target.
+- **Standard formats**: Full decode via `decode_from_bytes()` at tile size.
+
+The `needs_upscale()` check compares the decoded pixel dimensions against
+the tile's display dimensions. The upscale texture replaces the existing
+one, so the tile seamlessly sharpens without flicker.
 
 ### EXIF Orientation
 
