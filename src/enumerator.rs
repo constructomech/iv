@@ -43,6 +43,10 @@ fn enumerate_inner(folder: &Path, tx: &mpsc::Sender<EnumMessage>) {
         }
     };
 
+    // NTFS stores directory entries in a B+ tree sorted by name, so
+    // FindFirstFile/FindNextFile (used by read_dir on Windows) returns
+    // entries in alphabetical order. We stream them directly for
+    // responsiveness — no need to collect and sort.
     let mut count = 0usize;
 
     for entry in entries {
@@ -225,6 +229,36 @@ mod tests {
         }
 
         assert_eq!(found.len(), 3);
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn results_sorted_alphabetically() {
+        let dir = make_test_dir("sorted");
+        fs::write(dir.join("zebra.jpg"), b"fake").unwrap();
+        fs::write(dir.join("apple.jpg"), b"fake").unwrap();
+        fs::write(dir.join("Mango.png"), b"fake").unwrap();
+        fs::write(dir.join("banana.CR2"), b"fake").unwrap();
+
+        let handle = enumerate_folder(dir.clone());
+        let mut found = Vec::new();
+
+        for msg in handle.receiver {
+            match msg {
+                EnumMessage::Found(p) => found.push(p),
+                EnumMessage::Done(_) => break,
+                EnumMessage::Error(e) => panic!("unexpected error: {e}"),
+            }
+        }
+
+        let names: Vec<_> = found
+            .iter()
+            .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
+            .collect();
+        assert_eq!(
+            names,
+            vec!["apple.jpg", "banana.CR2", "Mango.png", "zebra.jpg"]
+        );
         cleanup(&dir);
     }
 }
