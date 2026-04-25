@@ -127,6 +127,8 @@ enum WorkTier {
     /// Raw files: extract larger embedded JPEG preview.
     /// Other formats: full decode + downscale to tile size.
     Upscale,
+    /// Read EXIF date-taken metadata only. Very fast, reads ~64KB.
+    DateScan,
 }
 
 /// A decode request sent from the I/O pool to the decode pool.
@@ -168,6 +170,8 @@ enum WorkResult {
         image: DecodedImage,
         ms: f64,
     },
+    /// Date-taken metadata extracted.
+    DateScanned { idx: usize, date: Option<String> },
     /// Decode failed.
     Failed { idx: usize },
 }
@@ -201,6 +205,8 @@ pub struct GridView {
     decoded_sizes: Vec<Option<(u32, u32)>>,
     /// Indices of tiles with in-flight upscale decodes.
     upgrading: std::collections::HashSet<usize>,
+    /// Indices of tiles with in-flight date scans.
+    date_scanning: std::collections::HashSet<usize>,
     /// Per-tile timing data for debug overlay.
     timings: Vec<TileTiming>,
     /// Cached file bytes from HEIC embedded extraction (avoids re-read for full decode).
@@ -328,6 +334,11 @@ impl GridView {
                                     }
                                 }
                             }
+                            WorkTier::DateScan => {
+                                let date = decode::read_date_taken(&req.data);
+                                let _ =
+                                    result_tx.send(WorkResult::DateScanned { idx: req.idx, date });
+                            }
                         }
                     }
                 })
@@ -342,6 +353,7 @@ impl GridView {
             textures: Vec::new(),
             decoded_sizes: Vec::new(),
             upgrading: std::collections::HashSet::new(),
+            date_scanning: std::collections::HashSet::new(),
             timings: Vec::new(),
             cached_data: Vec::new(),
             io_runtime,
@@ -488,6 +500,16 @@ impl GridView {
                         });
                     }
                 }
+                WorkResult::DateScanned { idx, date } => {
+                    if idx < self.grid.tile_count() {
+                        self.date_scanning.remove(&idx);
+                        if date.is_some() {
+                            self.grid.set_tile_date(idx, date);
+                        } else {
+                            self.grid.set_tile_no_date(idx);
+                        }
+                    }
+                }
             }
         }
         processed
@@ -600,6 +622,11 @@ impl GridView {
             return;
         }
         self.schedule_offscreen_embedded(current_gen, deadline);
+
+        // Phase 5: date-taken metadata scan (only in DateTaken sort mode)
+        if std::time::Instant::now() < *deadline {
+            self.schedule_date_scans(current_gen, deadline);
+        }
     }
 
     /// Schedule upscale decodes for visible tiles whose thumbnails are
@@ -647,8 +674,42 @@ impl GridView {
         }
     }
 
+    /// Schedule EXIF date-taken scans for tiles that don't have dates yet.
+    /// Only active in DateTaken sort mode.
+    fn schedule_date_scans(&mut self, current_gen: u64, deadline: &std::time::Instant) {
+        let needs_scan = self.grid.tiles_needing_date_scan();
+        if needs_scan.is_empty() {
+            return;
+        }
+
+        let mut scheduled_indices = Vec::new();
+        for idx in needs_scan {
+            if std::time::Instant::now() >= *deadline {
+                break;
+            }
+            if self.date_scanning.contains(&idx) {
+                continue;
+            }
+            let path = self.grid.tile_path(idx).to_path_buf();
+            if path.as_os_str().is_empty() {
+                continue;
+            }
+            self.date_scanning.insert(idx);
+            let is_heif = decode::is_heif_extension(&path);
+            self.spawn_io_read(idx, path, current_gen, WorkTier::DateScan, is_heif, 0);
+            scheduled_indices.push(idx);
+        }
+        if !scheduled_indices.is_empty() {
+            self.grid.record_event(GridEventKind::WorkScheduled {
+                indices: scheduled_indices,
+                tier: "date_scan".into(),
+            });
+        }
+    }
+
     /// Schedule embedded thumbnail extraction for off-screen tiles,
     /// expanding outward from the visible range so nearby tiles load first.
+    /// Iterates display positions and maps through display_order.
     fn schedule_offscreen_embedded(&mut self, current_gen: u64, deadline: &std::time::Instant) {
         let (vis_start, vis_end) = self.grid.visible_tile_range();
         let total = self.grid.tile_count();
@@ -657,6 +718,7 @@ impl GridView {
         }
 
         // Interleave: one tile below viewport, one above, expanding outward
+        // These are display-order positions, not tile indices.
         let mut below = vis_end;
         let mut above = vis_start.wrapping_sub(1); // will wrap to usize::MAX if vis_start == 0
         let mut scheduled_count = 0;
@@ -670,13 +732,14 @@ impl GridView {
 
             // Try below viewport
             while below < total {
-                if self.grid.tile_state(below) == TileState::NotLoaded {
-                    let path = self.grid.tile_path(below).to_path_buf();
+                let idx = self.grid.display_to_tile(below);
+                if self.grid.tile_state(idx) == TileState::NotLoaded {
+                    let path = self.grid.tile_path(idx).to_path_buf();
                     if !path.as_os_str().is_empty() {
-                        self.grid.set_tile_state(below, TileState::LoadingEmbedded);
+                        self.grid.set_tile_state(idx, TileState::LoadingEmbedded);
                         let is_heif = decode::is_heif_extension(&path);
                         self.spawn_io_read(
-                            below,
+                            idx,
                             path,
                             current_gen,
                             WorkTier::EmbeddedOnly,
@@ -695,13 +758,14 @@ impl GridView {
             // Try above viewport
             while above < total {
                 // above wraps to usize::MAX when it underflows, which is >= total
-                if self.grid.tile_state(above) == TileState::NotLoaded {
-                    let path = self.grid.tile_path(above).to_path_buf();
+                let idx = self.grid.display_to_tile(above);
+                if self.grid.tile_state(idx) == TileState::NotLoaded {
+                    let path = self.grid.tile_path(idx).to_path_buf();
                     if !path.as_os_str().is_empty() {
-                        self.grid.set_tile_state(above, TileState::LoadingEmbedded);
+                        self.grid.set_tile_state(idx, TileState::LoadingEmbedded);
                         let is_heif = decode::is_heif_extension(&path);
                         self.spawn_io_read(
-                            above,
+                            idx,
                             path,
                             current_gen,
                             WorkTier::EmbeddedOnly,
@@ -751,6 +815,18 @@ impl GridView {
                     // Full decode / upscale always needs the entire file
                     std::fs::read(&path).ok()
                 }
+                WorkTier::DateScan => {
+                    // Only need the EXIF header — first 64KB is enough
+                    use std::io::Read;
+                    (|| -> Option<Vec<u8>> {
+                        let mut file = std::fs::File::open(&path).ok()?;
+                        let file_len = file.metadata().ok()?.len() as usize;
+                        let read_len = file_len.min(PROBE_SIZE);
+                        let mut buf = vec![0u8; read_len];
+                        file.read_exact(&mut buf).ok()?;
+                        Some(buf)
+                    })()
+                }
             };
 
             let Some(data) = data else { return };
@@ -780,6 +856,7 @@ impl GridView {
             // Drain pending decode requests (I/O tasks check generation before sending)
             while self.decode_rx.try_recv().is_ok() {}
             self.upgrading.clear();
+            self.date_scanning.clear();
             let mut reset_count = 0;
             for idx in 0..self.grid.tile_count() {
                 match self.grid.tile_state(idx) {
@@ -818,6 +895,15 @@ impl GridView {
         let deadline =
             frame_start + std::time::Duration::from_secs_f64(FRAME_WORK_BUDGET_MS / 1000.0);
 
+        // Handle keyboard shortcuts
+        if ctx.input(|i| i.key_pressed(egui::Key::S)) {
+            use crate::grid::SortMode;
+            let new_mode = match self.grid.sort_mode() {
+                SortMode::Name => SortMode::DateTaken,
+                SortMode::DateTaken => SortMode::Name,
+            };
+            self.grid.set_sort_mode(new_mode);
+        }
         let poll_start = std::time::Instant::now();
         let results_processed = self.poll_results(ctx, &deadline);
         let results_pending = self.result_rx.len();
@@ -828,6 +914,7 @@ impl GridView {
         let tile_h = config.tile_height;
         let padding = config.padding;
         let cell_h = config.cell_height();
+
         let available_width = ui.available_width();
 
         // Reserve space at the bottom for the status bar
@@ -864,14 +951,58 @@ impl GridView {
 
                 let tile_count = self.grid.tile_count();
                 let debug = self.debug;
+                let sep_row = self.grid.separator_row();
+                let sorted_count = self.grid.sorted_count();
+                let display_order = self.grid.display_order();
 
                 for row in render_first..render_last {
-                    let row_start = row * cols;
-                    let row_end = (row_start + cols).min(tile_count);
+                    // Check if this is the separator row
+                    if sep_row == Some(row) {
+                        ui.horizontal(|ui| {
+                            ui.add_space(4.0);
+                            ui.label(
+                                egui::RichText::new("Loading order metadata…")
+                                    .color(egui::Color32::from_rgb(140, 140, 140))
+                                    .size(12.0)
+                                    .italics(),
+                            );
+                        });
+                        ui.allocate_space(egui::vec2(0.0, padding));
+                        continue;
+                    }
+
+                    // Map visual row to display-order position range
+                    let (disp_start, disp_end) = match sep_row {
+                        Some(sep) if row > sep => {
+                            let offset = (row - sep - 1) * cols;
+                            let start = sorted_count + offset;
+                            let end = (start + cols).min(tile_count);
+                            (start, end)
+                        }
+                        _ => {
+                            let start = row * cols;
+                            let end = if sep_row.is_some() {
+                                (start + cols).min(sorted_count)
+                            } else {
+                                (start + cols).min(tile_count)
+                            };
+                            (start, end)
+                        }
+                    };
+
+                    if disp_start >= disp_end {
+                        ui.allocate_space(egui::vec2(0.0, cell_h));
+                        continue;
+                    }
 
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing = egui::vec2(padding, 0.0);
-                        for idx in row_start..row_end {
+                        for (pos, &idx) in display_order
+                            .iter()
+                            .enumerate()
+                            .take(disp_end)
+                            .skip(disp_start)
+                        {
                             let state = self.grid.tile_state(idx);
                             let name = self.grid.tile_name(idx);
                             let texture = self.textures.get(idx).and_then(|t| t.as_ref());
@@ -880,7 +1011,7 @@ impl GridView {
                                 ui, idx, name, state, texture, timing, tile_w, tile_h, debug,
                             );
                             if response.clicked() {
-                                clicked = Some(idx);
+                                clicked = Some(pos);
                             }
                         }
                     });
@@ -917,6 +1048,16 @@ impl GridView {
                         .color(egui::Color32::from_rgb(160, 160, 160))
                         .size(12.0),
                 );
+                // Sort mode indicator
+                let sort_label = match self.grid.sort_mode() {
+                    crate::grid::SortMode::Name => "A→Z",
+                    crate::grid::SortMode::DateTaken => "Date",
+                };
+                ui.label(
+                    egui::RichText::new(format!("[S] {sort_label}"))
+                        .color(egui::Color32::from_rgb(120, 120, 120))
+                        .size(11.0),
+                );
             });
         });
 
@@ -949,11 +1090,12 @@ impl GridView {
                     .visible_in_state(TileState::CreatingThumbnail)
                     .is_empty();
             let has_offscreen_pending = !self.result_rx.is_empty();
+            let has_date_scan_pending = !self.grid.date_scan_complete();
             if has_visible_pending {
                 // Visible work: repaint at 60fps for responsiveness
                 ctx.request_repaint_after(std::time::Duration::from_millis(16));
-            } else if has_offscreen_pending {
-                // Off-screen work: repaint at 10fps to process results without wasting CPU
+            } else if has_offscreen_pending || has_date_scan_pending {
+                // Off-screen work or date scanning: repaint at 10fps to process results
                 ctx.request_repaint_after(std::time::Duration::from_millis(100));
             }
         }

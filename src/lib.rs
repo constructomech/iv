@@ -12,13 +12,14 @@ mod image_view;
 
 pub use app::{DecodedImage, load_image};
 pub use decode::{
-    DecodeTimings, ProbeResult, decode_for_upscale, decode_from_bytes, decode_raw_libraw,
-    decode_thumbnail, decode_thumbnail_progressive, extract_exif_thumbnail, is_heif_extension,
-    is_raw_extension, load_raw_preview, needs_upscale, probe_embedded_thumbnail,
-    try_embedded_from_bytes, try_exif_only, try_heif_thumbnail, try_heif_thumbnail_from_bytes,
+    DecodeTimings, ExifMetadata, ProbeResult, decode_for_upscale, decode_from_bytes,
+    decode_raw_libraw, decode_thumbnail, decode_thumbnail_progressive, extract_exif_thumbnail,
+    is_heif_extension, is_raw_extension, load_raw_preview, needs_upscale, probe_embedded_thumbnail,
+    read_date_taken, read_exif_metadata, try_embedded_from_bytes, try_exif_only,
+    try_heif_thumbnail, try_heif_thumbnail_from_bytes,
 };
 pub use enumerator::{EnumHandle, EnumMessage, enumerate_folder};
-pub use grid::{Grid, GridConfig, GridEvent, GridEventKind, TileState, VisibleRows};
+pub use grid::{Grid, GridConfig, GridEvent, GridEventKind, SortMode, TileState, VisibleRows};
 
 /// Register HEIF/HEIC decoder hooks so the `image` crate can decode these formats.
 /// Call once at startup before decoding any HEIC files.

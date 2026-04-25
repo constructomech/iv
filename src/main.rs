@@ -80,7 +80,7 @@ enum AppMode {
     /// Grid/folder view.
     Grid,
     /// Full-resolution image view.
-    Image(image_view::ImageView),
+    Image(Box<image_view::ImageView>),
 }
 
 /// The iv application.
@@ -108,12 +108,12 @@ impl IvApp {
     fn new_image(path: PathBuf, _log_enabled: bool) -> Self {
         let mut grid = grid::Grid::new(grid::GridConfig::default());
         let idx = grid.add_tile_with_path(path);
-        let paths = grid.all_paths().to_vec();
+        let paths = grid.all_paths();
         Self {
             grid_view: grid_view::GridView::new(grid),
             enum_handle: None,
             enum_done: true,
-            mode: AppMode::Image(image_view::ImageView::new(paths, idx)),
+            mode: AppMode::Image(Box::new(image_view::ImageView::new(paths, idx))),
         }
     }
 
@@ -164,10 +164,12 @@ impl eframe::App for IvApp {
             .show(ctx, |ui| match &mut self.mode {
                 AppMode::Grid => {
                     if let Some(clicked_idx) = self.grid_view.show(ctx, ui) {
-                        let paths: Vec<PathBuf> = self.grid_view.grid().all_paths().to_vec();
+                        let paths = self.grid_view.grid().all_paths();
                         if !paths.is_empty() && clicked_idx < paths.len() {
-                            self.mode =
-                                AppMode::Image(image_view::ImageView::new(paths, clicked_idx));
+                            self.mode = AppMode::Image(Box::new(image_view::ImageView::new(
+                                paths,
+                                clicked_idx,
+                            )));
                         }
                     }
                 }

@@ -828,6 +828,66 @@ pub fn read_exif_orientation(data: &[u8]) -> u32 {
     1
 }
 
+/// Read EXIF DateTimeOriginal (tag 0x9003) from file bytes.
+/// Returns the date string as-is from EXIF, e.g. "2023:04:15 14:30:00".
+/// Falls back to DateTime (tag 0x0132) if DateTimeOriginal is absent.
+/// Reads from an in-memory buffer — the caller should provide at least
+/// the first 64KB of the file (enough to cover the APP1/EXIF segment).
+pub fn read_date_taken(data: &[u8]) -> Option<String> {
+    read_exif_metadata(data).date_taken
+}
+
+/// Relevant EXIF metadata for the info pane.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ExifMetadata {
+    pub date_taken: Option<String>,
+    pub camera: Option<String>,
+    pub lens: Option<String>,
+    pub focal_length: Option<String>,
+    pub aperture: Option<String>,
+    pub shutter_speed: Option<String>,
+    pub iso: Option<String>,
+}
+
+/// Read a concise set of EXIF metadata from file bytes.
+pub fn read_exif_metadata(data: &[u8]) -> ExifMetadata {
+    let cursor = Cursor::new(data);
+    let exif_reader = exif::Reader::new();
+    let Ok(exif) = exif_reader.read_from_container(&mut std::io::BufReader::new(cursor)) else {
+        return ExifMetadata::default();
+    };
+
+    let date_taken = field_string(&exif, exif::Tag::DateTimeOriginal)
+        .or_else(|| field_string(&exif, exif::Tag::DateTime));
+    let make = field_string(&exif, exif::Tag::Make);
+    let model = field_string(&exif, exif::Tag::Model);
+    let camera = match (make, model) {
+        (Some(make), Some(model)) if model.starts_with(&make) => Some(model),
+        (Some(make), Some(model)) => Some(format!("{make} {model}")),
+        (Some(make), None) => Some(make),
+        (None, Some(model)) => Some(model),
+        (None, None) => None,
+    };
+
+    ExifMetadata {
+        date_taken,
+        camera,
+        lens: field_string(&exif, exif::Tag::LensModel),
+        focal_length: field_string(&exif, exif::Tag::FocalLength),
+        aperture: field_string(&exif, exif::Tag::FNumber),
+        shutter_speed: field_string(&exif, exif::Tag::ExposureTime),
+        iso: field_string(&exif, exif::Tag::PhotographicSensitivity),
+    }
+}
+
+fn field_string(exif: &exif::Exif, tag: exif::Tag) -> Option<String> {
+    exif.get_field(tag, exif::In::PRIMARY)
+        .or_else(|| exif.fields().find(|field| field.tag == tag))
+        .map(|field| field.display_value().with_unit(exif).to_string())
+        .map(|value| value.trim().trim_matches('\0').to_string())
+        .filter(|value| !value.is_empty())
+}
+
 /// Apply EXIF orientation transform to an image.
 pub fn apply_orientation(img: image::DynamicImage, orientation: u32) -> image::DynamicImage {
     match orientation {
@@ -1556,6 +1616,31 @@ mod tests {
         assert!(img.width <= 400 && img.height <= 400);
         assert!(img.width > 0 && img.height > 0);
 
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // -- Date-taken tests --
+
+    #[test]
+    fn read_date_taken_empty_returns_none() {
+        assert!(read_date_taken(&[]).is_none());
+    }
+
+    #[test]
+    fn read_date_taken_non_image_returns_none() {
+        assert!(read_date_taken(b"not an image file").is_none());
+    }
+
+    #[test]
+    fn read_date_taken_from_jpeg_with_exif() {
+        // Create a JPEG with EXIF data using the image crate
+        let dir = make_test_dir("date_jpeg");
+        let path = create_test_jpeg(&dir, "dated.jpg", 100, 100);
+        let data = fs::read(&path).unwrap();
+        // Our test JPEGs don't have EXIF date tags, so this should return None
+        let result = read_date_taken(&data);
+        // Test images created by image crate don't have EXIF — that's expected
+        assert!(result.is_none());
         let _ = fs::remove_dir_all(&dir);
     }
 }

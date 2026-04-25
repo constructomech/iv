@@ -1,14 +1,98 @@
 use eframe::egui;
+use std::io::Read;
 use std::path::PathBuf;
 use std::sync::mpsc;
 use std::thread;
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use crate::app::{DecodedImage, load_image, load_raw_full, load_raw_preview_image};
-use crate::decode::is_raw_extension;
+use crate::decode::{ExifMetadata, is_raw_extension, read_exif_metadata};
 
 /// Duration of the crossfade from preview to full-res (seconds).
 const CROSSFADE_DURATION: f32 = 0.3;
+const INFO_PANE_WIDTH: f32 = 260.0;
+const INFO_READ_SIZE: usize = 256 * 1024;
+
+#[derive(Debug, Clone, Default)]
+struct ImageInfo {
+    modified: Option<String>,
+    exif: ExifMetadata,
+}
+
+fn read_image_info(path: &PathBuf) -> ImageInfo {
+    let data = read_info_prefix(path).unwrap_or_default();
+    ImageInfo {
+        modified: std::fs::metadata(path)
+            .ok()
+            .and_then(|metadata| metadata.modified().ok())
+            .map(format_system_time),
+        exif: read_exif_metadata(&data),
+    }
+}
+
+fn read_info_prefix(path: &PathBuf) -> Option<Vec<u8>> {
+    let mut file = std::fs::File::open(path).ok()?;
+    let read_len = file.metadata().ok()?.len().min(INFO_READ_SIZE as u64) as usize;
+    let mut data = vec![0; read_len];
+    file.read_exact(&mut data).ok()?;
+    Some(data)
+}
+
+fn config_path() -> Option<PathBuf> {
+    std::env::var_os("APPDATA")
+        .map(PathBuf::from)
+        .map(|path| path.join("iv").join("config.txt"))
+}
+
+fn load_info_pane_open() -> bool {
+    let Some(path) = config_path() else {
+        return true;
+    };
+    match std::fs::read_to_string(path) {
+        Ok(text) => !text.lines().any(|line| line.trim() == "info_pane=false"),
+        Err(_) => true,
+    }
+}
+
+fn save_info_pane_open(open: bool) {
+    let Some(path) = config_path() else {
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(
+        path,
+        format!("info_pane={}\n", if open { "true" } else { "false" }),
+    );
+}
+
+fn format_system_time(time: SystemTime) -> String {
+    let seconds = time
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs() as i64)
+        .unwrap_or(0);
+    let days = seconds.div_euclid(86_400);
+    let seconds_of_day = seconds.rem_euclid(86_400);
+    let (year, month, day) = civil_from_days(days);
+    let hour = seconds_of_day / 3_600;
+    let minute = (seconds_of_day % 3_600) / 60;
+    format!("{year:04}-{month:02}-{day:02} {hour:02}:{minute:02} UTC")
+}
+
+fn civil_from_days(days_since_unix_epoch: i64) -> (i32, u32, u32) {
+    let z = days_since_unix_epoch + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = mp + if mp < 10 { 3 } else { -9 };
+    let year = y + if month <= 2 { 1 } else { 0 };
+    (year as i32, month as u32, day as u32)
+}
 
 /// Full-resolution image viewer with zoom, pan, and navigation.
 pub struct ImageView {
@@ -38,6 +122,12 @@ pub struct ImageView {
     upgrade_loader: Option<mpsc::Receiver<Option<DecodedImage>>>,
     /// Viewport size at last layout (for resolution-aware upgrade decision).
     last_viewport: egui::Vec2,
+    /// Whether the left info pane is visible.
+    info_pane_open: bool,
+    /// Cached metadata for the current image.
+    image_info: Option<ImageInfo>,
+    /// Background loader for current image metadata.
+    info_loader: Option<mpsc::Receiver<ImageInfo>>,
 }
 
 impl ImageView {
@@ -56,6 +146,9 @@ impl ImageView {
             upgrade_pending: false,
             upgrade_loader: None,
             last_viewport: egui::Vec2::ZERO,
+            info_pane_open: load_info_pane_open(),
+            image_info: None,
+            info_loader: None,
         };
         view.start_loading(start_index);
         view
@@ -76,6 +169,8 @@ impl ImageView {
         self.upgrade_loader = None;
         self.preview_texture = None;
         self.crossfade_start = None;
+        self.image_info = None;
+        self.start_info_loading(index);
 
         if is_raw {
             // Phase 1: fast embedded JPEG preview (~8ms)
@@ -89,6 +184,18 @@ impl ImageView {
                 let _ = tx.send(result);
             });
         }
+    }
+
+    fn start_info_loading(&mut self, index: usize) {
+        let Some(path) = self.paths.get(index).cloned() else {
+            return;
+        };
+        let (tx, rx) = mpsc::channel();
+        self.info_loader = Some(rx);
+        thread::spawn(move || {
+            let info = read_image_info(&path);
+            let _ = tx.send(info);
+        });
     }
 
     /// Start the full-res LibRaw decode after the preview is displayed.
@@ -208,6 +315,21 @@ impl ImageView {
                 }
             }
         }
+
+        if let Some(ref rx) = self.info_loader {
+            match rx.try_recv() {
+                Ok(info) => {
+                    self.image_info = Some(info);
+                    self.info_loader = None;
+                }
+                Err(mpsc::TryRecvError::Empty) => {
+                    ctx.request_repaint();
+                }
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    self.info_loader = None;
+                }
+            }
+        }
     }
 
     /// Navigate to a different image.
@@ -222,7 +344,9 @@ impl ImageView {
         self.error = None;
         self.loader = None;
         self.upgrade_loader = None;
+        self.info_loader = None;
         self.upgrade_pending = false;
+        self.image_info = None;
         self.reset_view();
 
         self.start_loading(index);
@@ -232,6 +356,11 @@ impl ImageView {
         self.zoom = 1.0;
         self.pan = egui::Vec2::ZERO;
         self.fit_mode = true;
+    }
+
+    fn toggle_info_pane(&mut self) {
+        self.info_pane_open = !self.info_pane_open;
+        save_info_pane_open(self.info_pane_open);
     }
 
     /// Render the image view. Returns true if user wants to go back to folder view.
@@ -257,6 +386,9 @@ impl ImageView {
             if input.key_pressed(egui::Key::F) {
                 do_reset = true;
             }
+            if input.key_pressed(egui::Key::I) {
+                self.toggle_info_pane();
+            }
             if input.key_pressed(egui::Key::Home) {
                 nav_to = Some(0);
             }
@@ -275,6 +407,16 @@ impl ImageView {
             self.navigate_to(idx);
         }
 
+        if self.info_pane_open {
+            egui::SidePanel::left("iv_image_info_pane")
+                .resizable(true)
+                .default_width(INFO_PANE_WIDTH)
+                .width_range(200.0..=360.0)
+                .show_inside(ui, |ui| {
+                    self.render_info_pane(ui);
+                });
+        }
+
         // Status bar
         let filename = self
             .paths
@@ -288,21 +430,40 @@ impl ImageView {
             current = self.current + 1,
             total = self.paths.len()
         );
-        ui.label(
-            egui::RichText::new(status)
-                .color(egui::Color32::from_rgb(180, 180, 180))
-                .size(13.0),
-        );
+        ui.horizontal(|ui| {
+            let (chevron, tooltip) = if self.info_pane_open {
+                ("‹", "Hide info pane")
+            } else {
+                ("›", "Show info pane")
+            };
+            let toggle_response = ui
+                .add_sized([22.0, 20.0], egui::Button::new(chevron))
+                .on_hover_text(tooltip);
+            if toggle_response.clicked() {
+                self.toggle_info_pane();
+            }
+            ui.label(
+                egui::RichText::new(status)
+                    .color(egui::Color32::from_rgb(180, 180, 180))
+                    .size(13.0),
+            );
+        });
         ui.add_space(4.0);
 
         // Image display area
-        let available = ui.available_size();
+        let image_rect = ui.available_rect_before_wrap();
+        let response = ui.allocate_rect(image_rect, egui::Sense::click_and_drag());
+        let available = response.rect.size();
         self.last_viewport = available;
 
         if let Some(ref error) = self.error {
-            ui.centered_and_justified(|ui| {
-                ui.colored_label(egui::Color32::from_rgb(255, 80, 80), error.as_str());
-            });
+            ui.painter().text(
+                response.rect.center(),
+                egui::Align2::CENTER_CENTER,
+                error.as_str(),
+                egui::FontId::proportional(14.0),
+                egui::Color32::from_rgb(255, 80, 80),
+            );
             return false;
         }
 
@@ -342,14 +503,8 @@ impl ImageView {
                 (tex_size.x * self.zoom, tex_size.y * self.zoom)
             };
 
-            // Handle mouse interactions
-            let response = ui.allocate_rect(
-                egui::Rect::from_min_size(ui.min_rect().min, available),
-                egui::Sense::click_and_drag(),
-            );
-
             let scroll_delta = ctx.input(|input| input.smooth_scroll_delta.y);
-            if scroll_delta != 0.0 {
+            if response.hovered() && scroll_delta != 0.0 {
                 self.fit_mode = false;
                 let zoom_factor = if scroll_delta > 0.0 { 1.1 } else { 1.0 / 1.1 };
                 self.zoom = (self.zoom * zoom_factor).clamp(0.1, 20.0);
@@ -371,10 +526,7 @@ impl ImageView {
             }
 
             // Compute image rect
-            let center = egui::pos2(
-                ui.min_rect().min.x + available.x / 2.0 + self.pan.x,
-                ui.min_rect().min.y + available.y / 2.0 + self.pan.y,
-            );
+            let center = response.rect.center() + self.pan;
             let img_rect = egui::Rect::from_center_size(center, egui::vec2(display_w, display_h));
             let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
 
@@ -405,11 +557,93 @@ impl ImageView {
                     .image(tex_id, img_rect, uv, egui::Color32::WHITE);
             }
         } else {
-            ui.centered_and_justified(|ui| {
-                ui.spinner();
-            });
+            let spinner_rect =
+                egui::Rect::from_center_size(response.rect.center(), egui::vec2(24.0, 24.0));
+            ui.put(spinner_rect, egui::Spinner::new());
         }
 
         false
+    }
+
+    fn render_info_pane(&mut self, ui: &mut egui::Ui) {
+        ui.vertical(|ui| {
+            ui.label(
+                egui::RichText::new("Info")
+                    .color(egui::Color32::from_rgb(210, 210, 210))
+                    .size(14.0)
+                    .strong(),
+            );
+            ui.separator();
+
+            let Some(path) = self.paths.get(self.current) else {
+                Self::info_row(ui, "File", "—");
+                return;
+            };
+            let name = path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
+
+            Self::info_row(ui, "File", &name);
+            if let Some(modified) = self
+                .image_info
+                .as_ref()
+                .and_then(|info| info.modified.as_deref())
+            {
+                Self::info_row(ui, "File date", modified);
+            } else {
+                Self::info_row(ui, "File date", "Loading...");
+            }
+
+            ui.add_space(8.0);
+            ui.label(
+                egui::RichText::new("EXIF")
+                    .color(egui::Color32::from_rgb(170, 170, 170))
+                    .size(11.0)
+                    .strong(),
+            );
+
+            if let Some(info) = &self.image_info {
+                Self::info_row_opt(ui, "Date taken", info.exif.date_taken.as_deref());
+                Self::info_row_opt(ui, "Camera", info.exif.camera.as_deref());
+                Self::info_row_opt(ui, "Lens", info.exif.lens.as_deref());
+                Self::info_row_opt(ui, "Focal length", info.exif.focal_length.as_deref());
+                Self::info_row_opt(ui, "Aperture", info.exif.aperture.as_deref());
+                Self::info_row_opt(ui, "Shutter", info.exif.shutter_speed.as_deref());
+                Self::info_row_opt(ui, "ISO", info.exif.iso.as_deref());
+            } else {
+                Self::info_row(ui, "Date taken", "Loading...");
+                Self::info_row(ui, "Camera", "Loading...");
+                Self::info_row(ui, "Focal length", "Loading...");
+            }
+
+            ui.add_space(8.0);
+            ui.label(
+                egui::RichText::new(path.display().to_string())
+                    .color(egui::Color32::from_rgb(100, 100, 100))
+                    .size(10.0),
+            );
+        });
+    }
+
+    fn info_row_opt(ui: &mut egui::Ui, label: &str, value: Option<&str>) {
+        Self::info_row(ui, label, value.unwrap_or("—"));
+    }
+
+    fn info_row(ui: &mut egui::Ui, label: &str, value: &str) {
+        ui.horizontal_wrapped(|ui| {
+            ui.set_min_height(18.0);
+            ui.label(
+                egui::RichText::new(label)
+                    .color(egui::Color32::from_rgb(120, 120, 120))
+                    .size(11.0),
+            );
+            ui.label(
+                egui::RichText::new(value)
+                    .color(egui::Color32::from_rgb(205, 205, 205))
+                    .size(12.0),
+            );
+        });
     }
 }

@@ -33,12 +33,37 @@ struct Grid {
     states: Vec<TileState>,   // Hot: scanned every frame for visible tiles
     names:  Vec<String>,      // Warm: read during rendering
     paths:  Vec<PathBuf>,     // Cold: read only when scheduling work
+    dates:  Vec<Option<String>>, // EXIF date-taken, populated by date scan
+    display_order: Vec<usize>,   // Maps display position → tile index
+    sorted_count: usize,         // How many display_order entries are sorted
+    sort_mode: SortMode,         // Name or DateTaken
     // ...layout config, viewport, activity log
 }
 ```
 
 Tile state is a one-byte enum. Scanning visible states (typically ~35 tiles)
 touches a contiguous 35-byte region — one cache line.
+
+### Display Order and Sort Modes
+
+The `display_order` vector maps display position → tile index, decoupling
+storage order from display order. Two sort modes are supported:
+
+- **Name** (default): Identity mapping `[0, 1, 2, …]`. Tiles arrive from
+  NTFS's B+ tree in alphabetical order, so no sorting is needed.
+- **DateTaken**: Tiles with known EXIF dates are sorted by date in the
+  first `sorted_count` positions. Tiles whose dates are not yet scanned
+  remain in the suffix. A visual separator row divides the two sections.
+
+When a tile's date arrives via `set_tile_date()`, it is binary-search
+inserted into the sorted prefix. Tiles without EXIF dates (PNG, BMP, etc.)
+are moved to the end of the sorted prefix via `set_tile_no_date()`.
+Switching back to Name mode rebuilds the identity mapping.
+
+All methods that return visible tile information (`visible_in_state()`,
+`visible_tiles()`, `visible_tile_info()`, `all_paths()`) go through
+`display_order`, so scheduling and rendering automatically respect the
+current sort.
 
 ### Layout Math
 
@@ -116,7 +141,7 @@ Without this state, tiles that failed embedded extraction went directly to
 — producing duplicate work requests. The `EmbeddedMissed` state separates
 "waiting to be scheduled" from "worker is processing", preventing duplicates.
 
-## Four-Phase Scheduling
+## Five-Phase Scheduling
 
 `schedule_visible_work()` runs once per frame inside the `show()` method.
 It strictly prioritizes phases in order, using a frame-time deadline to
@@ -140,6 +165,13 @@ An `upgrading` set tracks in-flight upscale requests to prevent duplicates.
 
 **Phase 4**: Preload off-screen `NotLoaded` tiles as `EmbeddedOnly`,
 expanding outward from the visible range so nearby tiles load first.
+
+**Phase 5**: EXIF date-taken metadata scan (only in `DateTaken` sort mode).
+Reads the first 64KB of each file and extracts `DateTimeOriginal` (tag
+0x9003), falling back to `DateTime` (tag 0x0132). Results flow back as
+`DateScanned` work results, which call `set_tile_date()` / `set_tile_no_date()`
+to incrementally sort tiles into the display order. A `date_scanning` set
+tracks in-flight scans to prevent duplicates.
 
 This ensures every visible tile shows *something* (even a low-res embedded
 thumbnail) before any expensive full decodes begin, and tiles that appear
@@ -178,10 +210,11 @@ A shared `AtomicU64` generation counter invalidates stale work:
 ### Result Processing
 
 `poll_results()` runs at the start of each frame, processing up to 16
-results. Each result triggers a texture upload (`ctx.load_texture`) and a
-state transition. Results for tiles that have already been loaded (e.g.,
-from a stale generation) are harmlessly applied — the texture is replaced
-and the state stays `Loaded`.
+results. Each image result triggers a texture upload (`ctx.load_texture`) and
+a state transition. `DateScanned` results update the Grid's display order when
+date sorting is active. Results for tiles that have already been loaded (e.g.,
+from a stale generation) are harmlessly applied — the texture is replaced and
+the state stays `Loaded`.
 
 ## Thumbnail Extraction Pipeline
 
@@ -290,6 +323,20 @@ regardless of total tile count.
 Vertical item spacing is set to 0 — row gaps are managed with explicit
 `allocate_space(padding)` after each row to ensure pixel-perfect alignment
 between skip regions and rendered rows.
+
+### Info Pane
+
+ImageView renders a collapsible left-side info pane via egui's side panel
+layout. The pane is only shown in full image view and follows the currently
+opened image. It shows file name, filesystem modified date, and a concise set
+of EXIF fields: date taken, camera, lens, focal length, aperture, shutter
+speed, and ISO. Metadata is loaded on a background thread from a small file
+prefix so opening the pane does not block image display. A chevron in the
+full image status row toggles the pane. The image itself is centered within
+the remaining image rectangle after the pane and status row have consumed
+their space. The pane's open/closed state is persisted in
+`%APPDATA%/iv/config.txt` as a simple `info_pane=true|false` line and is
+restored on startup.
 
 ## Activity Logging
 

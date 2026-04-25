@@ -6,6 +6,15 @@
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
+/// How tiles are sorted for display.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SortMode {
+    /// Alphabetical by filename (default). Instant — no metadata needed.
+    Name,
+    /// By EXIF date-taken. Requires background metadata scan.
+    DateTaken,
+}
+
 /// State of a single tile in the grid.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TileState {
@@ -152,6 +161,18 @@ pub struct Grid {
     states: Vec<TileState>,
     names: Vec<String>,
     paths: Vec<PathBuf>,
+    /// Per-tile EXIF date-taken string (e.g. "2023:04:15 14:30:00").
+    dates: Vec<Option<String>>,
+    /// Display order: maps display position → tile index.
+    /// In Name mode this is the identity mapping (0, 1, 2, …).
+    /// In DateTaken mode the first `sorted_count` entries are date-sorted,
+    /// and the remainder are tiles whose dates are not yet known.
+    display_order: Vec<usize>,
+    /// How many entries at the front of `display_order` are in their final
+    /// sorted position (only meaningful in DateTaken mode).
+    sorted_count: usize,
+    /// Current sort mode.
+    sort_mode: SortMode,
     /// Activity log for diagnostics. Only populated when logging is enabled.
     log: Vec<GridEvent>,
     /// Whether activity logging is enabled.
@@ -169,6 +190,10 @@ impl Grid {
             states: Vec::new(),
             names: Vec::new(),
             paths: Vec::new(),
+            dates: Vec::new(),
+            display_order: Vec::new(),
+            sorted_count: 0,
+            sort_mode: SortMode::Name,
             log: Vec::new(),
             logging: false,
             created: Instant::now(),
@@ -281,6 +306,8 @@ impl Grid {
         self.states.push(TileState::NotLoaded);
         self.names.push(name.into());
         self.paths.push(PathBuf::new());
+        self.dates.push(None);
+        self.display_order.push(idx);
         idx
     }
 
@@ -295,6 +322,10 @@ impl Grid {
         self.states.push(TileState::NotLoaded);
         self.names.push(name);
         self.paths.push(path);
+        self.dates.push(None);
+        // In DateTaken mode, new tiles go into the unsorted section (after sorted_count).
+        // In Name mode, identity mapping — new tile goes at the end.
+        self.display_order.push(idx);
         // Batch-log: record when adding first tile or every 100th tile
         if idx == 0 || (idx + 1).is_multiple_of(100) {
             self.record(GridEventKind::TilesAdded {
@@ -339,12 +370,152 @@ impl Grid {
     }
 
     /// Get visible tile indices that are in the given state.
-    /// O(visible) — only scans visible tiles.
+    /// O(visible) — only scans visible display positions.
     pub fn visible_in_state(&self, state: TileState) -> Vec<usize> {
         let (start, end) = self.visible_tile_range();
         (start..end)
+            .map(|pos| self.display_order[pos])
             .filter(|&idx| self.states[idx] == state)
             .collect()
+    }
+
+    // -- Sort / display order ----------------------------------------------
+
+    /// Get the current sort mode.
+    pub fn sort_mode(&self) -> SortMode {
+        self.sort_mode
+    }
+
+    /// Switch sort mode. Rebuilds the display order.
+    pub fn set_sort_mode(&mut self, mode: SortMode) {
+        if self.sort_mode == mode {
+            return;
+        }
+        self.sort_mode = mode;
+        self.rebuild_display_order();
+    }
+
+    /// Set a tile's date-taken string and, if in DateTaken mode, re-sort it
+    /// into the sorted section of the display order.
+    pub fn set_tile_date(&mut self, idx: usize, date: Option<String>) {
+        self.dates[idx] = date;
+        if self.sort_mode == SortMode::DateTaken {
+            self.insert_into_sorted(idx);
+        }
+    }
+
+    /// Get a tile's date-taken string.
+    pub fn tile_date(&self, idx: usize) -> Option<&str> {
+        self.dates[idx].as_deref()
+    }
+
+    /// How many tiles have been sorted (in DateTaken mode).
+    pub fn sorted_count(&self) -> usize {
+        if self.sort_mode == SortMode::DateTaken {
+            self.sorted_count
+        } else {
+            self.display_order.len()
+        }
+    }
+
+    /// Whether the date scan is complete (all tiles have dates or no-date).
+    pub fn date_scan_complete(&self) -> bool {
+        self.sort_mode != SortMode::DateTaken || self.sorted_count >= self.display_order.len()
+    }
+
+    /// Map a display position to a tile index.
+    pub fn display_to_tile(&self, pos: usize) -> usize {
+        self.display_order[pos]
+    }
+
+    /// Get display order as a slice (for rendering).
+    pub fn display_order(&self) -> &[usize] {
+        &self.display_order
+    }
+
+    /// Rebuild display_order from scratch based on current sort mode.
+    fn rebuild_display_order(&mut self) {
+        let n = self.states.len();
+        match self.sort_mode {
+            SortMode::Name => {
+                // Identity mapping — tiles are already in alphabetical order from NTFS
+                self.display_order = (0..n).collect();
+                self.sorted_count = n;
+            }
+            SortMode::DateTaken => {
+                // Partition: tiles with dates go to the sorted prefix,
+                // tiles without go to the unsorted suffix.
+                let mut with_dates: Vec<usize> =
+                    (0..n).filter(|&i| self.dates[i].is_some()).collect();
+                let without_dates: Vec<usize> =
+                    (0..n).filter(|&i| self.dates[i].is_none()).collect();
+                // Sort the dated tiles by date string (lexicographic on "YYYY:MM:DD HH:MM:SS" works)
+                with_dates.sort_by(|&a, &b| {
+                    self.dates[a]
+                        .as_deref()
+                        .unwrap_or("")
+                        .cmp(self.dates[b].as_deref().unwrap_or(""))
+                });
+                self.sorted_count = with_dates.len();
+                self.display_order = with_dates;
+                self.display_order.extend(without_dates);
+            }
+        }
+    }
+
+    /// Insert a tile (that just got a date) into the sorted section.
+    /// Removes it from the unsorted section and binary-searches the sorted
+    /// prefix for the correct insertion point.
+    fn insert_into_sorted(&mut self, tile_idx: usize) {
+        // Find and remove from current position (should be in unsorted section)
+        let Some(pos) = self.display_order.iter().position(|&i| i == tile_idx) else {
+            return;
+        };
+        self.display_order.remove(pos);
+        // If it was already in the sorted section, adjust sorted_count
+        if pos < self.sorted_count {
+            self.sorted_count -= 1;
+        }
+
+        let date = self.dates[tile_idx].as_deref().unwrap_or("");
+        // Binary search within the sorted prefix for insertion point
+        let insert_pos = self.display_order[..self.sorted_count]
+            .partition_point(|&i| self.dates[i].as_deref().unwrap_or("") <= date);
+        self.display_order.insert(insert_pos, tile_idx);
+        self.sorted_count += 1;
+    }
+
+    /// Mark a tile as having no date (scan completed, no EXIF date found).
+    /// In DateTaken mode, moves it to the end of the sorted section
+    /// (treated as "unknown date", sorts after all dated tiles).
+    pub fn set_tile_no_date(&mut self, idx: usize) {
+        if self.sort_mode == SortMode::DateTaken {
+            self.insert_into_sorted_no_date(idx);
+        }
+    }
+
+    /// Move a dateless tile from the unsorted suffix into the end of the sorted prefix.
+    fn insert_into_sorted_no_date(&mut self, tile_idx: usize) {
+        let Some(pos) = self.display_order.iter().position(|&i| i == tile_idx) else {
+            return;
+        };
+        // Only move if it's currently in the unsorted section
+        if pos < self.sorted_count {
+            return;
+        }
+        self.display_order.remove(pos);
+        // Insert at the end of the sorted section (after all dated tiles)
+        self.display_order.insert(self.sorted_count, tile_idx);
+        self.sorted_count += 1;
+    }
+
+    /// Get tile indices that still need date scanning.
+    /// Returns indices from the unsorted section of display_order.
+    pub fn tiles_needing_date_scan(&self) -> Vec<usize> {
+        if self.sort_mode != SortMode::DateTaken {
+            return Vec::new();
+        }
+        self.display_order[self.sorted_count..].to_vec()
     }
 
     // -- Layout ------------------------------------------------------------
@@ -361,12 +532,42 @@ impl Grid {
     }
 
     /// Total number of rows (based on tile count and columns).
+    /// In DateTaken mode with pending scans, includes a separator row.
     pub fn total_rows(&self) -> usize {
         let cols = self.cols();
         if cols == 0 {
             return 0;
         }
-        self.states.len().div_ceil(cols)
+        let n = self.states.len();
+        if n == 0 {
+            return 0;
+        }
+        if self.sort_mode == SortMode::DateTaken && !self.date_scan_complete() {
+            let sorted_rows = self.sorted_count.div_ceil(cols);
+            let unsorted_count = n - self.sorted_count;
+            let unsorted_rows = unsorted_count.div_ceil(cols);
+            let separator = if unsorted_count > 0 { 1 } else { 0 };
+            sorted_rows + separator + unsorted_rows
+        } else {
+            n.div_ceil(cols)
+        }
+    }
+
+    /// The display-position row where the separator sits (only in DateTaken mode).
+    /// Returns None if not in DateTaken mode or scan is complete.
+    pub fn separator_row(&self) -> Option<usize> {
+        if self.sort_mode != SortMode::DateTaken || self.date_scan_complete() {
+            return None;
+        }
+        let cols = self.cols();
+        if cols == 0 {
+            return None;
+        }
+        let unsorted_count = self.states.len() - self.sorted_count;
+        if unsorted_count == 0 {
+            return None;
+        }
+        Some(self.sorted_count.div_ceil(cols))
     }
 
     /// Total content height in pixels.
@@ -441,25 +642,51 @@ impl Grid {
         VisibleRows { first, last }
     }
 
-    /// Compute the range of tile indices that are visible [start, end).
+    /// Compute the range of display-order positions that are visible [start, end).
+    /// Accounts for the separator row in DateTaken mode.
     pub fn visible_tile_range(&self) -> (usize, usize) {
         let vr = self.visible_rows();
         let cols = self.cols();
-        let start = vr.first * cols;
-        let end = (vr.last * cols).min(self.states.len());
+        let n = self.display_order.len();
+        if n == 0 || cols == 0 {
+            return (0, 0);
+        }
+
+        let sep = self.separator_row();
+
+        // Convert a visual row to a display-order start position
+        let row_to_start = |row: usize| -> usize {
+            match sep {
+                Some(sep_row) if row > sep_row => {
+                    // After separator: skip sorted tiles + separator row
+                    let unsorted_pos = (row - sep_row - 1) * cols;
+                    self.sorted_count + unsorted_pos
+                }
+                _ => row * cols,
+            }
+        };
+
+        let start = row_to_start(vr.first).min(n);
+        // For end, compute the start of the row *after* the last visible row
+        let end = row_to_start(vr.last).min(n);
         (start, end)
     }
 
-    /// Iterate over visible tile indices.
-    pub fn visible_tiles(&self) -> impl Iterator<Item = usize> {
+    /// Iterate over visible tile indices (actual tile indices, not display positions).
+    pub fn visible_tiles(&self) -> Vec<usize> {
         let (start, end) = self.visible_tile_range();
-        start..end
+        (start..end).map(|pos| self.display_order[pos]).collect()
     }
 
-    /// Iterate over visible tiles, yielding (index, name, state) for each.
-    pub fn visible_tile_info(&self) -> impl Iterator<Item = (usize, &str, TileState)> {
+    /// Iterate over visible tiles, yielding (tile_index, name, state) for each.
+    pub fn visible_tile_info(&self) -> Vec<(usize, &str, TileState)> {
         let (start, end) = self.visible_tile_range();
-        (start..end).map(move |idx| (idx, self.names[idx].as_str(), self.states[idx]))
+        (start..end)
+            .map(|pos| {
+                let idx = self.display_order[pos];
+                (idx, self.names[idx].as_str(), self.states[idx])
+            })
+            .collect()
     }
 
     // -- Config access -----------------------------------------------------
@@ -482,9 +709,12 @@ impl Grid {
         &self.viewport
     }
 
-    /// Get all file paths (for image view navigation).
-    pub fn all_paths(&self) -> &[PathBuf] {
-        &self.paths
+    /// Get all file paths in display order (for image view navigation).
+    pub fn all_paths(&self) -> Vec<PathBuf> {
+        self.display_order
+            .iter()
+            .map(|&idx| self.paths[idx].clone())
+            .collect()
     }
 }
 
@@ -690,7 +920,7 @@ mod tests {
     #[test]
     fn visible_tiles_iterator() {
         let g = make_grid(10);
-        let tiles: Vec<usize> = g.visible_tiles().collect();
+        let tiles: Vec<usize> = g.visible_tiles();
         assert_eq!(tiles, (0..10).collect::<Vec<_>>());
     }
 
@@ -843,7 +1073,7 @@ mod tests {
 
         g.set_tile_state(1, TileState::Loaded);
 
-        let info: Vec<_> = g.visible_tile_info().collect();
+        let info: Vec<_> = g.visible_tile_info();
         assert_eq!(info.len(), 3);
         assert_eq!(info[0], (0, "a.jpg", TileState::NotLoaded));
         assert_eq!(info[1], (1, "b.png", TileState::Loaded));
@@ -855,7 +1085,7 @@ mod tests {
         let mut g = make_grid(100); // 15 rows, viewport shows 5
         g.set_scroll(336.0); // rows 2..7 visible
 
-        let info: Vec<_> = g.visible_tile_info().collect();
+        let info: Vec<_> = g.visible_tile_info();
         // rows 2..7 = 5 rows × 7 cols = 35 tiles
         assert_eq!(info.len(), 35);
         // First visible tile should be row 2, col 0 = idx 14
@@ -960,7 +1190,7 @@ mod tests {
             }
 
             let t = Instant::now();
-            let tiles: Vec<_> = g.visible_tile_info().collect();
+            let tiles: Vec<_> = g.visible_tile_info();
             enum_times.push(t.elapsed().as_micros());
 
             assert!(!tiles.is_empty());
@@ -1030,7 +1260,7 @@ mod tests {
             g.set_scroll(scroll);
 
             // Enumerate visible tiles
-            let visible: Vec<_> = g.visible_tile_info().collect();
+            let visible: Vec<_> = g.visible_tile_info();
             visible_counts.push(visible.len());
 
             // Validate all visible tiles
@@ -1083,6 +1313,7 @@ mod tests {
         // Filter visible tiles to find ones still needing work
         let need_work: Vec<usize> = g
             .visible_tile_info()
+            .into_iter()
             .filter(|&(_, _, state)| state == TileState::NotLoaded)
             .map(|(idx, _, _)| idx)
             .collect();
@@ -1257,5 +1488,115 @@ mod tests {
             assert!(end <= g.tile_count(), "tile range past count at {w}x{h}");
             assert!(start <= end);
         }
+    }
+
+    // -- Sort / display order tests ----------------------------------------
+
+    #[test]
+    fn default_sort_is_name() {
+        let g = make_grid(5);
+        assert_eq!(g.sort_mode(), SortMode::Name);
+        // Display order should be identity
+        assert_eq!(g.display_order(), &[0, 1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn date_taken_sort_partitions_by_date() {
+        let mut g = make_grid(5);
+        g.set_sort_mode(SortMode::DateTaken);
+        // Initially all tiles are unsorted (no dates)
+        assert_eq!(g.sorted_count(), 0);
+        assert!(!g.date_scan_complete());
+
+        // Set dates for some tiles
+        g.set_tile_date(2, Some("2023:01:15 10:00:00".into()));
+        g.set_tile_date(0, Some("2023:06:20 14:00:00".into()));
+        assert_eq!(g.sorted_count(), 2);
+
+        // First two display positions should be sorted by date
+        let order = g.display_order();
+        assert_eq!(order[0], 2); // earlier date
+        assert_eq!(order[1], 0); // later date
+
+        // Remaining 3 tiles should be unsorted
+        assert_eq!(g.tiles_needing_date_scan().len(), 3);
+    }
+
+    #[test]
+    fn set_tile_no_date_moves_to_sorted() {
+        let mut g = make_grid(3);
+        g.set_sort_mode(SortMode::DateTaken);
+
+        g.set_tile_date(1, Some("2023:01:01 00:00:00".into()));
+        g.set_tile_no_date(2); // no EXIF date
+        assert_eq!(g.sorted_count(), 2);
+
+        // Tile 1 (with date) should come first, tile 2 (no date) second
+        let order = g.display_order();
+        assert_eq!(order[0], 1);
+        assert_eq!(order[1], 2);
+    }
+
+    #[test]
+    fn switch_back_to_name_restores_identity() {
+        let mut g = make_grid(5);
+        g.set_sort_mode(SortMode::DateTaken);
+        g.set_tile_date(2, Some("2023:01:15 10:00:00".into()));
+
+        // Switch back to name sort
+        g.set_sort_mode(SortMode::Name);
+        assert_eq!(g.display_order(), &[0, 1, 2, 3, 4]);
+        assert_eq!(g.sorted_count(), 5); // all "sorted" in name mode
+    }
+
+    #[test]
+    fn separator_row_exists_during_date_scan() {
+        let mut g = make_grid(14); // 2 full rows of 7
+        g.set_sort_mode(SortMode::DateTaken);
+
+        // Set dates for first 7 tiles (one full row)
+        for i in 0..7 {
+            g.set_tile_date(i, Some(format!("2023:01:{:02} 00:00:00", i + 1)));
+        }
+
+        // Separator should be after row 0 (which contains the 7 sorted tiles)
+        assert_eq!(g.separator_row(), Some(1));
+        // Total rows: 1 (sorted) + 1 (separator) + 1 (unsorted) = 3
+        assert_eq!(g.total_rows(), 3);
+    }
+
+    #[test]
+    fn separator_disappears_when_scan_complete() {
+        let mut g = make_grid(3);
+        g.set_sort_mode(SortMode::DateTaken);
+
+        for i in 0..3 {
+            g.set_tile_date(i, Some(format!("2023:01:{:02} 00:00:00", i + 1)));
+        }
+
+        assert!(g.date_scan_complete());
+        assert_eq!(g.separator_row(), None);
+    }
+
+    #[test]
+    fn all_paths_respects_display_order() {
+        let mut g = Grid::new(GridConfig {
+            tile_width: 160.0,
+            tile_height: 160.0,
+            padding: 8.0,
+        });
+        g.add_tile_with_path("c.jpg".into());
+        g.add_tile_with_path("a.jpg".into());
+        g.add_tile_with_path("b.jpg".into());
+
+        g.set_sort_mode(SortMode::DateTaken);
+        g.set_tile_date(0, Some("2023:03:01 00:00:00".into())); // c.jpg
+        g.set_tile_date(1, Some("2023:01:01 00:00:00".into())); // a.jpg
+        g.set_tile_date(2, Some("2023:02:01 00:00:00".into())); // b.jpg
+
+        let paths = g.all_paths();
+        assert_eq!(paths[0].to_str().unwrap(), "a.jpg");
+        assert_eq!(paths[1].to_str().unwrap(), "b.jpg");
+        assert_eq!(paths[2].to_str().unwrap(), "c.jpg");
     }
 }
