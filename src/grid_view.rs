@@ -127,7 +127,8 @@ enum WorkTier {
     /// Raw files: extract larger embedded JPEG preview.
     /// Other formats: full decode + downscale to tile size.
     Upscale,
-    /// Read EXIF date-taken metadata only. Very fast, reads ~64KB.
+    /// Read EXIF date-taken metadata only.
+    /// JPEG-like files use a small prefix; TIFF/DNG uses seekable IFD traversal.
     DateScan,
 }
 
@@ -335,7 +336,7 @@ impl GridView {
                                 }
                             }
                             WorkTier::DateScan => {
-                                let date = decode::read_date_taken(&req.data);
+                                let date = decode::read_date_taken_from_path(&req.path, &req.data);
                                 let _ =
                                     result_tx.send(WorkResult::DateScanned { idx: req.idx, date });
                             }
@@ -816,7 +817,8 @@ impl GridView {
                     std::fs::read(&path).ok()
                 }
                 WorkTier::DateScan => {
-                    // Only need the EXIF header — first 64KB is enough
+                    // JPEG-like files usually only need the EXIF header. TIFF/DNG
+                    // may need offset-following reads from the decode worker.
                     use std::io::Read;
                     (|| -> Option<Vec<u8>> {
                         let mut file = std::fs::File::open(&path).ok()?;

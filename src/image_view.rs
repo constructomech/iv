@@ -1,17 +1,15 @@
 use eframe::egui;
-use std::io::Read;
 use std::path::PathBuf;
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use crate::app::{DecodedImage, load_image, load_raw_full, load_raw_preview_image};
-use crate::decode::{ExifMetadata, is_raw_extension, read_exif_metadata};
+use crate::decode::{ExifMetadata, is_raw_extension, read_exif_metadata_from_path};
 
 /// Duration of the crossfade from preview to full-res (seconds).
 const CROSSFADE_DURATION: f32 = 0.3;
 const INFO_PANE_WIDTH: f32 = 260.0;
-const INFO_READ_SIZE: usize = 256 * 1024;
 
 #[derive(Debug, Clone, Default)]
 struct ImageInfo {
@@ -20,22 +18,13 @@ struct ImageInfo {
 }
 
 fn read_image_info(path: &PathBuf) -> ImageInfo {
-    let data = read_info_prefix(path).unwrap_or_default();
     ImageInfo {
         modified: std::fs::metadata(path)
             .ok()
             .and_then(|metadata| metadata.modified().ok())
             .map(format_system_time),
-        exif: read_exif_metadata(&data),
+        exif: read_exif_metadata_from_path(path),
     }
-}
-
-fn read_info_prefix(path: &PathBuf) -> Option<Vec<u8>> {
-    let mut file = std::fs::File::open(path).ok()?;
-    let read_len = file.metadata().ok()?.len().min(INFO_READ_SIZE as u64) as usize;
-    let mut data = vec![0; read_len];
-    file.read_exact(&mut data).ok()?;
-    Some(data)
 }
 
 fn config_path() -> Option<PathBuf> {

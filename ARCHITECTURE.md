@@ -167,7 +167,9 @@ An `upgrading` set tracks in-flight upscale requests to prevent duplicates.
 expanding outward from the visible range so nearby tiles load first.
 
 **Phase 5**: EXIF date-taken metadata scan (only in `DateTaken` sort mode).
-Reads the first 64KB of each file and extracts `DateTimeOriginal` (tag
+JPEG-like files use a small prefix read. TIFF/DNG files use a seekable reader
+so the EXIF parser can follow IFD offsets to metadata values without reading
+the full raw image into memory. The scan extracts `DateTimeOriginal` (tag
 0x9003), falling back to `DateTime` (tag 0x0132). Results flow back as
 `DateScanned` work results, which call `set_tile_date()` / `set_tile_no_date()`
 to incrementally sort tiles into the display order. A `date_scanning` set
@@ -331,12 +333,12 @@ layout. The pane is only shown in full image view and follows the currently
 opened image. It shows file name, filesystem modified date, and a concise set
 of EXIF fields: date taken, camera, lens, focal length, aperture, shutter
 speed, and ISO. Metadata is loaded on a background thread from a small file
-prefix so opening the pane does not block image display. A chevron in the
-full image status row toggles the pane. The image itself is centered within
-the remaining image rectangle after the pane and status row have consumed
-their space. The pane's open/closed state is persisted in
-`%APPDATA%/iv/config.txt` as a simple `info_pane=true|false` line and is
-restored on startup.
+prefix for JPEG-like files or from seekable TIFF/DNG IFD traversal, so opening
+the pane does not block image display on full raw reads. A chevron in the full
+image status row toggles the pane. The image itself is centered within the
+remaining image rectangle after the pane and status row have consumed their
+space. The pane's open/closed state is persisted in `%APPDATA%/iv/config.txt`
+as a simple `info_pane=true|false` line and is restored on startup.
 
 ## Activity Logging
 

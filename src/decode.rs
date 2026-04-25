@@ -1,4 +1,4 @@
-use std::io::Cursor;
+use std::io::{BufReader, Cursor, Read};
 use std::path::Path;
 
 use crate::app::DecodedImage;
@@ -12,7 +12,7 @@ pub struct DecodeTimings {
     pub full_ms: f64,
 }
 
-/// Maximum bytes to read for an EXIF-only check (256KB covers all EXIF headers).
+/// Maximum bytes to read for prefix-based EXIF checks on JPEG-like containers.
 const EXIF_READ_SIZE: usize = 256 * 1024;
 
 // ---------------------------------------------------------------------------
@@ -831,10 +831,22 @@ pub fn read_exif_orientation(data: &[u8]) -> u32 {
 /// Read EXIF DateTimeOriginal (tag 0x9003) from file bytes.
 /// Returns the date string as-is from EXIF, e.g. "2023:04:15 14:30:00".
 /// Falls back to DateTime (tag 0x0132) if DateTimeOriginal is absent.
-/// Reads from an in-memory buffer — the caller should provide at least
-/// the first 64KB of the file (enough to cover the APP1/EXIF segment).
+/// Reads from an in-memory buffer. This is the fast prefix path for JPEG-like
+/// containers; use `read_date_taken_from_path()` for TIFF/DNG files whose IFD
+/// values may live beyond the initial prefix.
 pub fn read_date_taken(data: &[u8]) -> Option<String> {
     read_exif_metadata(data).date_taken
+}
+
+/// Read EXIF date-taken from a file path, using seekable TIFF/DNG metadata
+/// traversal when the container stores IFD values outside the initial prefix.
+pub fn read_date_taken_from_path(path: &Path, prefix: &[u8]) -> Option<String> {
+    if is_tiff_like_extension(path)
+        && let Some(metadata) = read_exif_metadata_seekable(path)
+    {
+        return metadata.date_taken;
+    }
+    read_date_taken(prefix)
 }
 
 /// Relevant EXIF metadata for the info pane.
@@ -857,10 +869,53 @@ pub fn read_exif_metadata(data: &[u8]) -> ExifMetadata {
         return ExifMetadata::default();
     };
 
-    let date_taken = field_string(&exif, exif::Tag::DateTimeOriginal)
-        .or_else(|| field_string(&exif, exif::Tag::DateTime));
-    let make = field_string(&exif, exif::Tag::Make);
-    let model = field_string(&exif, exif::Tag::Model);
+    exif_metadata_from_exif(&exif)
+}
+
+/// Read a concise set of EXIF metadata from a file path.
+///
+/// JPEG-like containers still use a small prefix read. TIFF/DNG containers use
+/// a seekable reader so the EXIF parser can follow IFD offsets without reading
+/// the full raw image into memory.
+pub fn read_exif_metadata_from_path(path: &Path) -> ExifMetadata {
+    if is_tiff_like_extension(path)
+        && let Some(metadata) = read_exif_metadata_seekable(path)
+    {
+        return metadata;
+    }
+
+    read_prefix(path, EXIF_READ_SIZE)
+        .map(|data| read_exif_metadata(&data))
+        .unwrap_or_default()
+}
+
+fn read_exif_metadata_seekable(path: &Path) -> Option<ExifMetadata> {
+    let file = std::fs::File::open(path).ok()?;
+    let mut reader = BufReader::new(file);
+    let exif = exif::Reader::new().read_from_container(&mut reader).ok()?;
+    Some(exif_metadata_from_exif(&exif))
+}
+
+fn read_prefix(path: &Path, max_len: usize) -> Option<Vec<u8>> {
+    let mut file = std::fs::File::open(path).ok()?;
+    let read_len = file.metadata().ok()?.len().min(max_len as u64) as usize;
+    let mut data = vec![0; read_len];
+    file.read_exact(&mut data).ok()?;
+    Some(data)
+}
+
+fn is_tiff_like_extension(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| matches!(ext.to_ascii_lowercase().as_str(), "dng" | "tif" | "tiff"))
+        .unwrap_or(false)
+}
+
+fn exif_metadata_from_exif(exif: &exif::Exif) -> ExifMetadata {
+    let date_taken = field_string(exif, exif::Tag::DateTimeOriginal)
+        .or_else(|| field_string(exif, exif::Tag::DateTime));
+    let make = field_string(exif, exif::Tag::Make);
+    let model = field_string(exif, exif::Tag::Model);
     let camera = match (make, model) {
         (Some(make), Some(model)) if model.starts_with(&make) => Some(model),
         (Some(make), Some(model)) => Some(format!("{make} {model}")),
@@ -872,11 +927,11 @@ pub fn read_exif_metadata(data: &[u8]) -> ExifMetadata {
     ExifMetadata {
         date_taken,
         camera,
-        lens: field_string(&exif, exif::Tag::LensModel),
-        focal_length: field_string(&exif, exif::Tag::FocalLength),
-        aperture: field_string(&exif, exif::Tag::FNumber),
-        shutter_speed: field_string(&exif, exif::Tag::ExposureTime),
-        iso: field_string(&exif, exif::Tag::PhotographicSensitivity),
+        lens: field_string(exif, exif::Tag::LensModel),
+        focal_length: field_string(exif, exif::Tag::FocalLength),
+        aperture: field_string(exif, exif::Tag::FNumber),
+        shutter_speed: field_string(exif, exif::Tag::ExposureTime),
+        iso: field_string(exif, exif::Tag::PhotographicSensitivity),
     }
 }
 
@@ -884,8 +939,17 @@ fn field_string(exif: &exif::Exif, tag: exif::Tag) -> Option<String> {
     exif.get_field(tag, exif::In::PRIMARY)
         .or_else(|| exif.fields().find(|field| field.tag == tag))
         .map(|field| field.display_value().with_unit(exif).to_string())
-        .map(|value| value.trim().trim_matches('\0').to_string())
+        .map(clean_exif_value)
         .filter(|value| !value.is_empty())
+}
+
+fn clean_exif_value(value: String) -> String {
+    let value = value.trim().trim_matches('\0').trim();
+    if value.len() >= 2 && value.starts_with('"') && value.ends_with('"') {
+        value[1..value.len() - 1].to_string()
+    } else {
+        value.to_string()
+    }
 }
 
 /// Apply EXIF orientation transform to an image.
@@ -1642,5 +1706,119 @@ mod tests {
         // Test images created by image crate don't have EXIF — that's expected
         assert!(result.is_none());
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_exif_metadata_from_dng_follows_far_ifd_offsets() {
+        let dir = make_test_dir("far_dng_exif");
+        let path = dir.join("far_metadata.dng");
+        write_minimal_dng_with_far_metadata(&path);
+
+        let data = fs::read(&path).unwrap();
+        let prefix = &data[..EXIF_READ_SIZE];
+        assert!(read_exif_metadata(prefix).date_taken.is_none());
+
+        let metadata = read_exif_metadata_from_path(&path);
+        assert!(
+            metadata
+                .date_taken
+                .as_deref()
+                .is_some_and(|date| date.contains("2016") && date.contains("23:01:18"))
+        );
+        assert_eq!(metadata.camera.as_deref(), Some("Canon EOS 5D Mark III"));
+        assert_eq!(metadata.lens.as_deref(), Some("EF24-105mm f/4L IS USM"));
+        assert_eq!(metadata.focal_length.as_deref(), Some("80 mm"));
+
+        let date = read_date_taken_from_path(&path, prefix);
+        assert!(
+            date.as_deref()
+                .is_some_and(|date| date.contains("2016") && date.contains("23:01:18"))
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    fn write_minimal_dng_with_far_metadata(path: &std::path::Path) {
+        let date_offset = 300_000usize;
+        let make_offset = 300_032usize;
+        let model_offset = 300_064usize;
+        let lens_offset = 300_128usize;
+        let focal_offset = 300_192usize;
+        let exif_ifd_offset = 1024usize;
+        let mut data = vec![0u8; 300_256];
+
+        data[0..2].copy_from_slice(b"II");
+        put_u16_le(&mut data, 2, 42);
+        put_u32_le(&mut data, 4, 8);
+
+        put_u16_le(&mut data, 8, 4);
+        write_ifd_entry(&mut data, 10, 0x010f, 2, 6, make_offset as u32);
+        write_ifd_entry(&mut data, 22, 0x0110, 2, 22, model_offset as u32);
+        write_ifd_entry(&mut data, 34, 0x8769, 4, 1, exif_ifd_offset as u32);
+        write_ifd_entry(&mut data, 46, 0x0132, 2, 20, date_offset as u32);
+        put_u32_le(&mut data, 58, 0);
+
+        put_u16_le(&mut data, exif_ifd_offset, 3);
+        write_ifd_entry(
+            &mut data,
+            exif_ifd_offset + 2,
+            0x9003,
+            2,
+            20,
+            date_offset as u32,
+        );
+        write_ifd_entry(
+            &mut data,
+            exif_ifd_offset + 14,
+            0xa434,
+            2,
+            23,
+            lens_offset as u32,
+        );
+        write_ifd_entry(
+            &mut data,
+            exif_ifd_offset + 26,
+            0x920a,
+            5,
+            1,
+            focal_offset as u32,
+        );
+        put_u32_le(&mut data, exif_ifd_offset + 38, 0);
+
+        write_tiff_ascii(&mut data, date_offset, "2016:09:24 23:01:18");
+        write_tiff_ascii(&mut data, make_offset, "Canon");
+        write_tiff_ascii(&mut data, model_offset, "Canon EOS 5D Mark III");
+        write_tiff_ascii(&mut data, lens_offset, "EF24-105mm f/4L IS USM");
+        put_u32_le(&mut data, focal_offset, 80);
+        put_u32_le(&mut data, focal_offset + 4, 1);
+
+        fs::write(path, data).unwrap();
+    }
+
+    fn write_tiff_ascii(data: &mut [u8], offset: usize, value: &str) {
+        data[offset..offset + value.len()].copy_from_slice(value.as_bytes());
+        data[offset + value.len()] = 0;
+    }
+
+    fn write_ifd_entry(
+        data: &mut [u8],
+        offset: usize,
+        tag: u16,
+        field_type: u16,
+        count: u32,
+        value_or_offset: u32,
+    ) {
+        put_u16_le(data, offset, tag);
+        put_u16_le(data, offset + 2, field_type);
+        put_u32_le(data, offset + 4, count);
+        put_u32_le(data, offset + 8, value_or_offset);
+    }
+
+    fn put_u16_le(data: &mut [u8], offset: usize, value: u16) {
+        data[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
+    }
+
+    fn put_u32_le(data: &mut [u8], offset: usize, value: u32) {
+        data[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
     }
 }
