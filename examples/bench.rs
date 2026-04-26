@@ -5,7 +5,7 @@
 /// and full-decode performance for each format.
 ///
 /// Usage:
-///   cargo run --release --example bench -- <source.dng> [extra_raw1.cr2 ...]
+///   cargo run --release --example bench -- --raw <source.raw> [--raw extra.raw ...]
 ///
 /// Generated files are cached next to the source. Delete to regenerate.
 use image::{ImageFormat, RgbImage, RgbaImage};
@@ -18,27 +18,86 @@ use std::time::Instant;
 
 const ITERATIONS: usize = 5;
 
+fn parse_raw_args(args: &[String]) -> Vec<PathBuf> {
+    if args.is_empty() {
+        print_usage_and_exit();
+    }
+
+    let mut raw_files = Vec::new();
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--raw" => {
+                index += 1;
+                if index >= args.len() {
+                    eprintln!("Missing path after --raw");
+                    print_usage_and_exit();
+                }
+                raw_files.push(validate_existing_path(&args[index]));
+            }
+            "--dng" => {
+                eprintln!("--dng has been renamed to --raw");
+                index += 1;
+                if index >= args.len() {
+                    eprintln!("Missing path after --dng");
+                    print_usage_and_exit();
+                }
+                raw_files.push(validate_existing_path(&args[index]));
+            }
+            "-h" | "--help" => print_usage_and_exit(),
+            arg if arg.starts_with('-') => {
+                eprintln!("Unknown option: {arg}");
+                print_usage_and_exit();
+            }
+            arg => {
+                raw_files.push(validate_existing_path(arg));
+            }
+        }
+        index += 1;
+    }
+
+    if raw_files.is_empty() {
+        print_usage_and_exit();
+    }
+    raw_files
+}
+
+fn validate_existing_path(value: &str) -> PathBuf {
+    let path = PathBuf::from(value);
+    if !path.exists() {
+        eprintln!("File not found: {}", path.display());
+        std::process::exit(1);
+    }
+    path
+}
+
+fn print_usage_and_exit() -> ! {
+    eprintln!("Usage: bench --raw <source.raw> [--raw extra.raw ...]");
+    eprintln!(
+        "The first --raw file seeds generated comparison images; later raw files are benchmarked as extra RAW rows."
+    );
+    std::process::exit(1);
+}
+
 fn main() {
     libheif_rs::integration::image::register_all_decoding_hooks();
 
     let args: Vec<String> = std::env::args().skip(1).collect();
-    if args.is_empty() || args[0].starts_with('-') {
-        eprintln!("Usage: bench <source.dng> [extra.cr2 ...]");
-        std::process::exit(1);
-    }
-
-    let source = PathBuf::from(&args[0]);
-    if !source.exists() {
-        eprintln!("File not found: {}", source.display());
-        std::process::exit(1);
-    }
-    let extra_raws: Vec<PathBuf> = args[1..].iter().map(PathBuf::from).collect();
+    let raw_files = parse_raw_args(&args);
+    let source = raw_files[0].clone();
+    let extra_raws = &raw_files[1..];
 
     // Decode source to full-res RGB
     println!("Decoding source via LibRaw: {}", source.display());
     let t0 = Instant::now();
     let src_data = std::fs::read(&source).expect("read failed");
-    let decoded = iv::decode_raw_libraw(&src_data).expect("LibRaw failed");
+    let decoded = iv::decode_raw_libraw(&src_data).unwrap_or_else(|| {
+        eprintln!(
+            "LibRaw failed to decode source raw file: {}",
+            source.display()
+        );
+        std::process::exit(1);
+    });
     println!(
         "  {}x{} in {:.0}ms\n",
         decoded.width,
@@ -67,7 +126,7 @@ fn main() {
     // Collect files to benchmark
     let mut files: Vec<(PathBuf, &str)> = Vec::new();
     files.push((source.clone(), "RAW"));
-    for r in &extra_raws {
+    for r in extra_raws {
         if r.exists() {
             files.push((r.clone(), "RAW"));
         }
@@ -99,7 +158,7 @@ fn main() {
         let name = path.file_name().unwrap_or_default().to_string_lossy();
         let kb = std::fs::metadata(path).map(|m| m.len() / 1024).unwrap_or(0);
         let (t_ms, t_px) = bench_thumb(path);
-        let (f_ms, f_px) = bench_full(path);
+        let (f_ms, f_px) = bench_full(path, *kind == "RAW");
         let px = if f_px.is_empty() { &t_px } else { &f_px };
         println!(
             "{:<30} {:>5} {:>9} {:>10.1} {:>10.1} {:>10}",
@@ -112,7 +171,7 @@ fn main() {
         );
     }
     println!("{}", "-".repeat(80));
-    println!("\nThumb = grid path | Full = viewer path");
+    println!("\nThumb = grid path | Full = full decode path (RAW via LibRaw)");
 }
 
 // ---------------------------------------------------------------------------
@@ -283,13 +342,13 @@ fn bench_thumb(path: &Path) -> (f64, String) {
     (median(&mut times), px)
 }
 
-fn bench_full(path: &Path) -> (f64, String) {
-    let _ = iv::load_image(path);
+fn bench_full(path: &Path, raw: bool) -> (f64, String) {
+    let _ = load_full_for_bench(path, raw);
     let mut times = Vec::with_capacity(ITERATIONS);
     let mut px = String::new();
     for _ in 0..ITERATIONS {
         let s = Instant::now();
-        match iv::load_image(path) {
+        match load_full_for_bench(path, raw) {
             Ok(i) => {
                 times.push(s.elapsed().as_secs_f64() * 1000.0);
                 px = format!("{}x{}", i.width, i.height);
@@ -301,6 +360,15 @@ fn bench_full(path: &Path) -> (f64, String) {
         }
     }
     (median(&mut times), px)
+}
+
+fn load_full_for_bench(path: &Path, raw: bool) -> Result<iv::DecodedImage, String> {
+    if raw {
+        let data = std::fs::read(path).map_err(|e| format!("read failed: {e}"))?;
+        iv::decode_raw_libraw(&data).ok_or_else(|| "LibRaw failed".to_string())
+    } else {
+        iv::load_image(path)
+    }
 }
 
 fn median(data: &mut [f64]) -> f64 {
