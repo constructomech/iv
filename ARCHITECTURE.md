@@ -289,6 +289,24 @@ When opening a raw file (DNG, CR2, NEF, ARW, etc.) in full-size image view,
 LibRaw handles EXIF orientation internally, so no manual rotation is needed.
 The output is full sensor resolution (e.g. 6000×4000 for 24MP).
 
+After full-image decode, ImageView applies detected Adobe Camera Raw / Lightroom
+XMP develop settings as a best-effort display transform when the default-on
+"Apply lossless edits" diagnostic toggle is enabled. This work lives in
+`src/develop.rs`, keeping `src/decode.rs` focused on decoding, thumbnails, EXIF,
+and raw preview extraction. Sidecar `.xmp` files next to the image take
+precedence over embedded XMP packets. TIFF/DNG embedded XMP is read from tag 700
+(`XMLPacket`) using targeted seekable I/O, while other containers use a bounded
+prefix scan for `<x:xmpmeta>` / `<rdf:RDF>` packets.
+The transform intentionally covers only settings with reasonable display-space
+approximations: exposure, brightness, contrast, shadows/fill/highlight recovery,
+white balance/tint, tone curves, parametric tone regions, saturation/vibrance,
+HSL hue/saturation/luminance bands, grayscale conversion, shadow tint, clarity,
+vignette/post-crop vignette, split toning, and grain. These effects are
+Darktable-inspired category matches, not Adobe-compatible numeric matches.
+Camera profiles, sharpening, noise reduction, chromatic aberration, defringe,
+and lens-correction fields are parsed for display but are not applied because
+matching those faithfully would require a much larger raw development engine.
+
 A thin C wrapper (`src/libraw_wrapper.c`) encapsulates the full pipeline
 in one function call, avoiding any Rust dependency on LibRaw's complex
 `libraw_data_t` struct layout. LibRaw and its transitive dependencies
@@ -332,13 +350,21 @@ ImageView renders a collapsible left-side info pane via egui's side panel
 layout. The pane is only shown in full image view and follows the currently
 opened image. It shows file name, filesystem modified date, and a concise set
 of EXIF fields: date taken, camera, lens, focal length, aperture, shutter
-speed, and ISO. Metadata is loaded on a background thread from a small file
-prefix for JPEG-like files or from seekable TIFF/DNG IFD traversal, so opening
-the pane does not block image display on full raw reads. A chevron in the full
-image status row toggles the pane. The image itself is centered within the
-remaining image rectangle after the pane and status row have consumed their
-space. The pane's open/closed state is persisted in `%APPDATA%/iv/config.txt`
-as a simple `info_pane=true|false` line and is restored on startup.
+speed, and ISO. It also shows detected XMP develop settings and a default-on
+"Apply lossless edits" toggle used to reload the current image with or without
+the display transform. The pane only lists non-neutral settings that would affect
+rendering. Settings consumed by the active display transform are rendered bright
+white; supported settings are gray when the transform toggle is disabled;
+non-neutral settings that iv detects but does not implement are rendered red.
+Neutral and metadata-only CRS fields are hidden. Metadata is loaded on a background
+thread from a small file prefix for JPEG-like files or from seekable TIFF/DNG IFD
+traversal, so opening the pane does not block image display on full raw reads.
+The pane body scrolls so long Develop sections do not expand the image layout. A
+chevron in the full image status row toggles the pane. The image itself is
+centered within the remaining visible image rectangle after the pane and status
+row have consumed their space. The pane's open/closed state is persisted in
+`%APPDATA%/iv/config.txt` as a simple `info_pane=true|false` line and is
+restored on startup.
 
 ## Activity Logging
 

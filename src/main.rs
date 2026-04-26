@@ -9,6 +9,7 @@ rust_i18n::i18n!("locales", fallback = "en");
 
 mod app;
 mod decode;
+mod develop;
 mod enumerator;
 mod grid;
 mod grid_view;

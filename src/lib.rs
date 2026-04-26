@@ -5,6 +5,7 @@ rust_i18n::i18n!("locales", fallback = "en");
 
 mod app;
 mod decode;
+mod develop;
 mod enumerator;
 pub mod grid;
 mod grid_view;
@@ -17,6 +18,10 @@ pub use decode::{
     is_heif_extension, is_raw_extension, load_raw_preview, needs_upscale, probe_embedded_thumbnail,
     read_date_taken, read_date_taken_from_path, read_exif_metadata, read_exif_metadata_from_path,
     try_embedded_from_bytes, try_exif_only, try_heif_thumbnail, try_heif_thumbnail_from_bytes,
+};
+pub use develop::{
+    XmpDevelopSetting, XmpDevelopSettings, XmpDevelopSource, apply_xmp_develop_settings,
+    read_xmp_develop_settings_for_image, read_xmp_develop_settings_from_path,
 };
 pub use enumerator::{EnumHandle, EnumMessage, enumerate_folder};
 pub use grid::{Grid, GridConfig, GridEvent, GridEventKind, SortMode, TileState, VisibleRows};

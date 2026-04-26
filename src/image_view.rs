@@ -4,8 +4,12 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use crate::app::{DecodedImage, load_image, load_raw_full, load_raw_preview_image};
+use crate::app::{
+    DecodedImage, load_image_with_develop, load_raw_full_with_develop,
+    load_raw_preview_image_with_develop,
+};
 use crate::decode::{ExifMetadata, is_raw_extension, read_exif_metadata_from_path};
+use crate::develop::{XmpDevelopSetting, XmpDevelopSettings, read_xmp_develop_settings_from_path};
 
 /// Duration of the crossfade from preview to full-res (seconds).
 const CROSSFADE_DURATION: f32 = 0.3;
@@ -15,6 +19,7 @@ const INFO_PANE_WIDTH: f32 = 260.0;
 struct ImageInfo {
     modified: Option<String>,
     exif: ExifMetadata,
+    develop: XmpDevelopSettings,
 }
 
 fn read_image_info(path: &PathBuf) -> ImageInfo {
@@ -24,6 +29,7 @@ fn read_image_info(path: &PathBuf) -> ImageInfo {
             .and_then(|metadata| metadata.modified().ok())
             .map(format_system_time),
         exif: read_exif_metadata_from_path(path),
+        develop: read_xmp_develop_settings_from_path(path),
     }
 }
 
@@ -105,6 +111,8 @@ pub struct ImageView {
     fit_mode: bool,
     /// Background loader for the current image.
     loader: Option<mpsc::Receiver<Result<DecodedImage, String>>>,
+    /// Whether the next primary image load should reset zoom/pan.
+    reset_view_after_load: bool,
     /// Whether a full-res upgrade is pending (progressive raw loading).
     upgrade_pending: bool,
     /// Background loader for full-res raw upgrade.
@@ -113,6 +121,8 @@ pub struct ImageView {
     last_viewport: egui::Vec2,
     /// Whether the left info pane is visible.
     info_pane_open: bool,
+    /// Whether XMP lossless/develop edits are applied to decoded pixels.
+    apply_lossless_edits: bool,
     /// Cached metadata for the current image.
     image_info: Option<ImageInfo>,
     /// Background loader for current image metadata.
@@ -132,44 +142,50 @@ impl ImageView {
             pan: egui::Vec2::ZERO,
             fit_mode: true,
             loader: None,
+            reset_view_after_load: true,
             upgrade_pending: false,
             upgrade_loader: None,
             last_viewport: egui::Vec2::ZERO,
             info_pane_open: load_info_pane_open(),
+            apply_lossless_edits: true,
             image_info: None,
             info_loader: None,
         };
-        view.start_loading(start_index);
+        view.start_loading(start_index, true, true);
         view
     }
 
     /// Start loading an image on a background thread.
     /// For raw files, loads the fast preview first, then kicks off LibRaw upgrade.
-    fn start_loading(&mut self, index: usize) {
+    fn start_loading(&mut self, index: usize, reload_info: bool, reset_view_after_load: bool) {
         if index >= self.paths.len() {
             return;
         }
 
         let path = self.paths[index].clone();
         let is_raw = is_raw_extension(&path);
+        let apply_lossless_edits = self.apply_lossless_edits;
         let (tx, rx) = mpsc::channel();
         self.loader = Some(rx);
+        self.reset_view_after_load = reset_view_after_load;
         self.upgrade_pending = is_raw;
         self.upgrade_loader = None;
         self.preview_texture = None;
         self.crossfade_start = None;
-        self.image_info = None;
-        self.start_info_loading(index);
+        if reload_info {
+            self.image_info = None;
+            self.start_info_loading(index);
+        }
 
         if is_raw {
             // Phase 1: fast embedded JPEG preview (~8ms)
             thread::spawn(move || {
-                let result = load_raw_preview_image(&path);
+                let result = load_raw_preview_image_with_develop(&path, apply_lossless_edits);
                 let _ = tx.send(result);
             });
         } else {
             thread::spawn(move || {
-                let result = load_image(&path);
+                let result = load_image_with_develop(&path, apply_lossless_edits);
                 let _ = tx.send(result);
             });
         }
@@ -211,11 +227,12 @@ impl ImageView {
         let Some(path) = self.paths.get(self.current).cloned() else {
             return;
         };
+        let apply_lossless_edits = self.apply_lossless_edits;
         let (tx, rx) = mpsc::channel();
         self.upgrade_loader = Some(rx);
 
         thread::spawn(move || {
-            let result = load_raw_full(&path);
+            let result = load_raw_full_with_develop(&path, apply_lossless_edits);
             let _ = tx.send(result);
         });
     }
@@ -250,7 +267,10 @@ impl ImageView {
                     ));
                     self.error = None;
                     self.loader = None;
-                    self.reset_view();
+                    if self.reset_view_after_load {
+                        self.reset_view();
+                    }
+                    self.reset_view_after_load = false;
                     self.preload_adjacent();
                     // For raw files, kick off the full-res upgrade
                     self.start_raw_upgrade();
@@ -259,6 +279,7 @@ impl ImageView {
                     self.error = Some(e);
                     self.texture = None;
                     self.loader = None;
+                    self.reset_view_after_load = false;
                 }
                 Err(mpsc::TryRecvError::Empty) => {
                     ctx.request_repaint();
@@ -268,6 +289,7 @@ impl ImageView {
                         self.error = Some(rust_i18n::t!("error.load_failed").to_string());
                     }
                     self.loader = None;
+                    self.reset_view_after_load = false;
                 }
             }
         }
@@ -338,7 +360,18 @@ impl ImageView {
         self.image_info = None;
         self.reset_view();
 
-        self.start_loading(index);
+        self.start_loading(index, true, true);
+    }
+
+    fn reload_current_image(&mut self, reset_view_after_load: bool) {
+        self.texture = None;
+        self.preview_texture = None;
+        self.crossfade_start = None;
+        self.error = None;
+        self.loader = None;
+        self.upgrade_loader = None;
+        self.upgrade_pending = false;
+        self.start_loading(self.current, false, reset_view_after_load);
     }
 
     fn reset_view(&mut self) {
@@ -402,7 +435,11 @@ impl ImageView {
                 .default_width(INFO_PANE_WIDTH)
                 .width_range(200.0..=360.0)
                 .show_inside(ui, |ui| {
-                    self.render_info_pane(ui);
+                    egui::ScrollArea::vertical()
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            self.render_info_pane(ui);
+                        });
                 });
         }
 
@@ -440,7 +477,7 @@ impl ImageView {
         ui.add_space(4.0);
 
         // Image display area
-        let image_rect = ui.available_rect_before_wrap();
+        let image_rect = ui.available_rect_before_wrap().intersect(ui.clip_rect());
         let response = ui.allocate_rect(image_rect, egui::Sense::click_and_drag());
         let available = response.rect.size();
         self.last_viewport = available;
@@ -564,15 +601,18 @@ impl ImageView {
             );
             ui.separator();
 
-            let Some(path) = self.paths.get(self.current) else {
+            let Some((name, path_text)) = self.paths.get(self.current).map(|path| {
+                (
+                    path.file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .to_string(),
+                    path.display().to_string(),
+                )
+            }) else {
                 Self::info_row(ui, "File", "—");
                 return;
             };
-            let name = path
-                .file_name()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .to_string();
 
             Self::info_row(ui, "File", &name);
             if let Some(modified) = self
@@ -609,11 +649,105 @@ impl ImageView {
 
             ui.add_space(8.0);
             ui.label(
-                egui::RichText::new(path.display().to_string())
+                egui::RichText::new("Develop")
+                    .color(egui::Color32::from_rgb(170, 170, 170))
+                    .size(11.0)
+                    .strong(),
+            );
+            if Self::lossless_edits_toggle(ui, &mut self.apply_lossless_edits).changed() {
+                self.reload_current_image(false);
+            }
+
+            if let Some(info) = &self.image_info {
+                if !info.develop.has_visible_settings() {
+                    Self::info_row(ui, "Settings", "—");
+                } else {
+                    let source = info
+                        .develop
+                        .source
+                        .map(|source| source.label())
+                        .unwrap_or("XMP");
+                    Self::info_row(ui, "Source", source);
+                    for setting in info.develop.visible_settings() {
+                        Self::develop_row(ui, setting, self.apply_lossless_edits);
+                    }
+                }
+            } else {
+                Self::info_row(ui, "Settings", "Loading...");
+            }
+
+            ui.add_space(8.0);
+            ui.label(
+                egui::RichText::new(path_text)
                     .color(egui::Color32::from_rgb(100, 100, 100))
                     .size(10.0),
             );
         });
+    }
+
+    fn develop_row(ui: &mut egui::Ui, setting: &XmpDevelopSetting, edits_active: bool) {
+        let color = if setting.unsupported {
+            egui::Color32::from_rgb(235, 76, 76)
+        } else if edits_active && setting.applied {
+            egui::Color32::WHITE
+        } else {
+            egui::Color32::from_rgb(105, 105, 105)
+        };
+        ui.horizontal_wrapped(|ui| {
+            ui.set_min_height(18.0);
+            ui.label(egui::RichText::new(&setting.name).color(color).size(11.0));
+            ui.label(egui::RichText::new(&setting.value).color(color).size(12.0));
+        });
+    }
+
+    fn lossless_edits_toggle(ui: &mut egui::Ui, value: &mut bool) -> egui::Response {
+        let row_height = 24.0;
+        let switch_size = egui::vec2(38.0, 20.0);
+        let (rect, mut response) = ui.allocate_exact_size(
+            egui::vec2(ui.available_width(), row_height),
+            egui::Sense::click(),
+        );
+        if response.clicked() {
+            *value = !*value;
+            response.mark_changed();
+        }
+
+        if response.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
+
+        let switch_rect = egui::Rect::from_min_size(
+            egui::pos2(rect.left(), rect.center().y - switch_size.y * 0.5),
+            switch_size,
+        );
+        let track_color = match (*value, response.hovered()) {
+            (true, true) => egui::Color32::from_rgb(74, 155, 96),
+            (true, false) => egui::Color32::from_rgb(58, 135, 82),
+            (false, true) => egui::Color32::from_rgb(92, 92, 92),
+            (false, false) => egui::Color32::from_rgb(70, 70, 70),
+        };
+        let knob_radius = 7.5;
+        let knob_x = if *value {
+            switch_rect.right() - switch_size.y * 0.5
+        } else {
+            switch_rect.left() + switch_size.y * 0.5
+        };
+        ui.painter()
+            .rect_filled(switch_rect, switch_size.y * 0.5, track_color);
+        ui.painter().circle_filled(
+            egui::pos2(knob_x, switch_rect.center().y),
+            knob_radius,
+            egui::Color32::from_rgb(235, 235, 235),
+        );
+        ui.painter().text(
+            egui::pos2(switch_rect.right() + 8.0, rect.center().y),
+            egui::Align2::LEFT_CENTER,
+            "Apply lossless edits",
+            egui::FontId::proportional(12.0),
+            egui::Color32::from_rgb(205, 205, 205),
+        );
+
+        response.on_hover_text("Reload this image with or without XMP develop transforms")
     }
 
     fn info_row_opt(ui: &mut egui::Ui, label: &str, value: Option<&str>) {

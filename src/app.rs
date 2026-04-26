@@ -20,6 +20,13 @@ pub struct DecodedImage {
 /// For raw files (DNG, CR2, NEF, etc.), uses LibRaw for full-resolution demosaicing,
 /// falling back to the embedded JPEG preview.
 pub fn load_image(path: &Path) -> Result<DecodedImage, String> {
+    load_image_with_develop(path, true)
+}
+
+pub(crate) fn load_image_with_develop(
+    path: &Path,
+    apply_develop: bool,
+) -> Result<DecodedImage, String> {
     let data =
         std::fs::read(path).map_err(|e| format!("Failed to read {}: {e}", path.display()))?;
 
@@ -27,31 +34,59 @@ pub fn load_image(path: &Path) -> Result<DecodedImage, String> {
     // Falls back to the largest embedded JPEG preview if LibRaw fails.
     if crate::decode::is_raw_extension(path) {
         if let Some(decoded) = crate::decode::decode_raw_libraw(&data) {
-            return Ok(decoded);
+            return Ok(apply_develop_settings(decoded, path, &data, apply_develop));
         }
         if let Some(decoded) = crate::decode::load_raw_preview(&data) {
-            return Ok(decoded);
+            return Ok(apply_develop_settings(decoded, path, &data, apply_develop));
         }
     }
 
     load_image_standard(&data, path)
+        .map(|decoded| apply_develop_settings(decoded, path, &data, apply_develop))
 }
 
 /// Fast preview for raw files: extract the embedded JPEG preview (~8ms)
 /// without doing full demosaicing. Used for progressive loading.
 pub fn load_raw_preview_image(path: &Path) -> Result<DecodedImage, String> {
+    load_raw_preview_image_with_develop(path, true)
+}
+
+pub(crate) fn load_raw_preview_image_with_develop(
+    path: &Path,
+    apply_develop: bool,
+) -> Result<DecodedImage, String> {
     let data =
         std::fs::read(path).map_err(|e| format!("Failed to read {}: {e}", path.display()))?;
     if let Some(decoded) = crate::decode::load_raw_preview(&data) {
-        return Ok(decoded);
+        return Ok(apply_develop_settings(decoded, path, &data, apply_develop));
     }
     load_image_standard(&data, path)
+        .map(|decoded| apply_develop_settings(decoded, path, &data, apply_develop))
 }
 
 /// Full-resolution raw decode via LibRaw. Returns None for non-raw formats.
 pub fn load_raw_full(path: &Path) -> Option<DecodedImage> {
+    load_raw_full_with_develop(path, true)
+}
+
+pub(crate) fn load_raw_full_with_develop(path: &Path, apply_develop: bool) -> Option<DecodedImage> {
     let data = std::fs::read(path).ok()?;
     crate::decode::decode_raw_libraw(&data)
+        .map(|decoded| apply_develop_settings(decoded, path, &data, apply_develop))
+}
+
+fn apply_develop_settings(
+    mut decoded: DecodedImage,
+    path: &Path,
+    data: &[u8],
+    apply_develop: bool,
+) -> DecodedImage {
+    if !apply_develop {
+        return decoded;
+    }
+    let settings = crate::develop::read_xmp_develop_settings_for_image(path, Some(data));
+    crate::develop::apply_xmp_develop_settings(&mut decoded, &settings);
+    decoded
 }
 
 /// Standard image decode path (non-raw or raw fallback).
@@ -199,6 +234,28 @@ mod tests {
         std::fs::write(&path, b"hello world").unwrap();
         let result = load_image(&path);
         assert!(result.is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_image_with_develop_can_disable_sidecar_edits() {
+        let dir = std::env::temp_dir().join(format!("iv_test_develop_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("photo.png");
+        let image = image::RgbaImage::from_raw(1, 1, vec![96, 96, 96, 255]).unwrap();
+        image.save(&path).unwrap();
+        std::fs::write(
+            path.with_extension("xmp"),
+            r#"<rdf:RDF><rdf:Description crs:Exposure="1.00" /></rdf:RDF>"#,
+        )
+        .unwrap();
+
+        let edited = load_image_with_develop(&path, true).unwrap();
+        let unedited = load_image_with_develop(&path, false).unwrap();
+
+        assert!(edited.pixels[0] > unedited.pixels[0]);
+        assert_eq!(&unedited.pixels[..4], &[96, 96, 96, 255]);
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
