@@ -233,9 +233,11 @@ are built. The scan also checks whether each returned child folder has direct
 child folders of its own, so known leaf folders render as plain rows without
 an expand disclosure.
 
-The pane includes an in-memory text filter. Filtering is case-insensitive and
-applies only to folder nodes already loaded in the lazy tree; it does not start
-recursive filesystem searches or build a persistent index.
+The pane includes an in-memory text filter. Focusing the search box starts a
+session-only recursive folder scan under the tree root. Discovered folders are
+streamed back to the UI and merged into the same `FolderTree`, so substring
+matches can appear gradually while the user types. The scan still does not read
+image files, thumbnails, or metadata, and it does not build a persistent index.
 
 Selecting a folder replaces the current `Grid` with a fresh one, preserves the
 current tile size and sort mode, and starts the existing non-recursive image

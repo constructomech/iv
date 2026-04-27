@@ -1,13 +1,17 @@
 use eframe::egui;
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::thread;
+
+const SCAN_MESSAGES_PER_FRAME: usize = 128;
 
 /// Lazy, in-memory folder tree for browsing the filesystem without a catalog.
 pub struct FolderTree {
     root: FolderNode,
     selected: PathBuf,
     filter: String,
+    recursive_scan: RecursiveScanState,
 }
 
 struct FolderNode {
@@ -28,6 +32,17 @@ enum FolderLoadState {
     Error(String),
 }
 
+enum RecursiveScanState {
+    Idle,
+    Running(mpsc::Receiver<RecursiveScanMessage>),
+    Done,
+}
+
+enum RecursiveScanMessage {
+    Folder(FolderEntry),
+    Done,
+}
+
 impl FolderTree {
     pub fn new(root: PathBuf) -> Self {
         let selected = root.clone();
@@ -37,6 +52,7 @@ impl FolderTree {
             root,
             selected,
             filter: String::new(),
+            recursive_scan: RecursiveScanState::Idle,
         }
     }
 
@@ -46,13 +62,18 @@ impl FolderTree {
 
     pub fn show(&mut self, ui: &mut egui::Ui) -> Option<PathBuf> {
         self.root.poll_loads(ui.ctx());
+        self.poll_recursive_scan(ui.ctx());
         let mut selected: Option<PathBuf> = None;
         let selected_path = self.selected.clone();
 
-        ui.add_sized(
+        let search_response = ui.add_sized(
             [ui.available_width(), 22.0],
             egui::TextEdit::singleline(&mut self.filter).hint_text("Search folders"),
         );
+        if search_response.has_focus() && self.start_recursive_scan() {
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(50));
+        }
         ui.add_space(4.0);
 
         let filter = normalized_filter(&self.filter);
@@ -73,6 +94,60 @@ impl FolderTree {
             self.selected = path.clone();
         }
         selected
+    }
+
+    fn start_recursive_scan(&mut self) -> bool {
+        if !matches!(self.recursive_scan, RecursiveScanState::Idle) {
+            return false;
+        }
+
+        let (tx, rx) = mpsc::channel();
+        let root_path = self.root.path.clone();
+        thread::spawn(move || scan_descendant_folders(root_path, tx));
+        self.recursive_scan = RecursiveScanState::Running(rx);
+        true
+    }
+
+    fn poll_recursive_scan(&mut self, ctx: &egui::Context) {
+        let mut messages = Vec::new();
+        let mut done = false;
+
+        if let RecursiveScanState::Running(rx) = &self.recursive_scan {
+            for _ in 0..SCAN_MESSAGES_PER_FRAME {
+                match rx.try_recv() {
+                    Ok(message) => messages.push(message),
+                    Err(mpsc::TryRecvError::Empty) => break,
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        done = true;
+                        break;
+                    }
+                }
+            }
+        }
+
+        let had_messages = !messages.is_empty();
+        for message in messages {
+            match message {
+                RecursiveScanMessage::Folder(entry) => {
+                    self.root
+                        .merge_scanned_folder(entry.path, entry.has_child_folders);
+                }
+                RecursiveScanMessage::Done => {
+                    done = true;
+                }
+            }
+        }
+
+        if done {
+            self.recursive_scan = RecursiveScanState::Done;
+            ctx.request_repaint();
+        } else if matches!(self.recursive_scan, RecursiveScanState::Running(_)) {
+            ctx.request_repaint_after(std::time::Duration::from_millis(50));
+        }
+
+        if had_messages {
+            ctx.request_repaint();
+        }
     }
 
     fn show_node(
@@ -206,6 +281,84 @@ impl FolderNode {
         matches!(&self.state, FolderLoadState::Loaded(children) if children.is_empty())
     }
 
+    fn merge_scanned_folder(&mut self, path: PathBuf, has_child_folders: bool) {
+        if same_path(&self.path, &path) {
+            self.set_known_child_status(has_child_folders);
+            return;
+        }
+
+        let root_path = self.path.clone();
+        let Ok(relative_path) = path.strip_prefix(&root_path) else {
+            return;
+        };
+        let components: Vec<_> = relative_path
+            .components()
+            .map(|component| component.as_os_str().to_os_string())
+            .collect();
+        if components.is_empty() {
+            return;
+        }
+
+        let last_component = components.len() - 1;
+        let mut current_path = root_path;
+        let mut node = self;
+        for (component_index, component) in components.into_iter().enumerate() {
+            current_path.push(component);
+            let child_has_folders = component_index < last_component || has_child_folders;
+            node = node.ensure_child(current_path.clone(), child_has_folders);
+        }
+    }
+
+    fn ensure_child(&mut self, path: PathBuf, has_child_folders: bool) -> &mut FolderNode {
+        let children = self.children_for_merge();
+        if let Some(child_index) = children
+            .iter()
+            .position(|child| same_path(&child.path, &path))
+        {
+            children[child_index].set_known_child_status(has_child_folders);
+            return &mut children[child_index];
+        }
+
+        let sort_key = folder_sort_key(&path);
+        let insert_index = children
+            .binary_search_by(|child| folder_sort_key(&child.path).cmp(&sort_key))
+            .unwrap_or_else(|index| index);
+        children.insert(
+            insert_index,
+            FolderNode::from_entry(FolderEntry {
+                path,
+                has_child_folders,
+            }),
+        );
+        &mut children[insert_index]
+    }
+
+    fn children_for_merge(&mut self) -> &mut Vec<FolderNode> {
+        if !matches!(self.state, FolderLoadState::Loaded(_)) {
+            self.state = FolderLoadState::Loaded(Vec::new());
+        }
+
+        match &mut self.state {
+            FolderLoadState::Loaded(children) => children,
+            _ => unreachable!(),
+        }
+    }
+
+    fn set_known_child_status(&mut self, has_child_folders: bool) {
+        if has_child_folders {
+            if matches!(&self.state, FolderLoadState::Loaded(children) if children.is_empty())
+                || matches!(&self.state, FolderLoadState::Error(_))
+            {
+                self.state = FolderLoadState::Unknown;
+            }
+        } else if matches!(
+            &self.state,
+            FolderLoadState::Unknown | FolderLoadState::Loading(_) | FolderLoadState::Error(_)
+        ) {
+            self.state = FolderLoadState::Loaded(Vec::new());
+        }
+    }
+
     fn is_visible_for_filter(&self, filter: Option<&str>) -> bool {
         let Some(filter) = filter else {
             return true;
@@ -291,14 +444,32 @@ fn list_child_folders(path: &Path) -> Result<Vec<FolderEntry>, String> {
             });
         }
     }
-    folders.sort_by_key(|entry| {
-        entry
-            .path
-            .file_name()
-            .map(|name| name.to_string_lossy().to_ascii_lowercase())
-            .unwrap_or_default()
-    });
+    folders.sort_by_key(|entry| folder_sort_key(&entry.path));
     Ok(folders)
+}
+
+fn scan_descendant_folders(root_path: PathBuf, tx: mpsc::Sender<RecursiveScanMessage>) {
+    let mut queue = VecDeque::from([root_path]);
+    while let Some(path) = queue.pop_front() {
+        let entries = match list_child_folders(&path) {
+            Ok(entries) => entries,
+            Err(error) => {
+                log::warn!("{error}");
+                continue;
+            }
+        };
+
+        for entry in entries {
+            if entry.has_child_folders {
+                queue.push_back(entry.path.clone());
+            }
+            if tx.send(RecursiveScanMessage::Folder(entry)).is_err() {
+                return;
+            }
+        }
+    }
+
+    let _ = tx.send(RecursiveScanMessage::Done);
 }
 
 fn has_child_folders(path: &Path) -> bool {
@@ -321,6 +492,12 @@ fn same_path(left: &Path, right: &Path) -> bool {
     } else {
         left == right
     }
+}
+
+fn folder_sort_key(path: &Path) -> String {
+    path.file_name()
+        .map(|name| name.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default()
 }
 
 fn normalized_filter(filter: &str) -> Option<String> {
@@ -381,5 +558,62 @@ mod tests {
         } else {
             panic!("expected loaded children");
         }
+    }
+
+    #[test]
+    fn merge_scanned_folder_inserts_nested_paths_sorted() {
+        let root_path = PathBuf::from("photos");
+        let mut root = FolderNode::new(root_path.clone());
+        root.merge_scanned_folder(root_path.join("2002").join("cats"), false);
+        root.merge_scanned_folder(root_path.join("2001").join("dogs"), false);
+
+        let FolderLoadState::Loaded(years) = &root.state else {
+            panic!("expected loaded years");
+        };
+        let year_names: Vec<_> = years.iter().map(FolderNode::display_name).collect();
+        assert_eq!(year_names, vec!["2001", "2002"]);
+        assert!(years[1].has_loaded_descendant_match("cat"));
+    }
+
+    #[test]
+    fn recursive_scan_streams_descendant_folders() {
+        let dir = std::env::temp_dir().join(format!(
+            "iv_folder_tree_recursive_test_{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("2001").join("dogs")).unwrap();
+        fs::create_dir_all(dir.join("2002").join("cats")).unwrap();
+
+        let (tx, rx) = mpsc::channel();
+        scan_descendant_folders(dir.clone(), tx);
+
+        let mut folders = Vec::new();
+        while let Ok(message) = rx.recv() {
+            match message {
+                RecursiveScanMessage::Folder(entry) => folders.push(entry),
+                RecursiveScanMessage::Done => break,
+            }
+        }
+
+        assert!(folders.iter().any(|entry| entry.path == dir.join("2001")));
+        assert!(folders.iter().any(|entry| entry.path == dir.join("2002")));
+        assert!(
+            folders
+                .iter()
+                .any(|entry| entry.path == dir.join("2002").join("cats"))
+        );
+        let year = folders
+            .iter()
+            .find(|entry| entry.path == dir.join("2002"))
+            .unwrap();
+        assert!(year.has_child_folders);
+        let cats = folders
+            .iter()
+            .find(|entry| entry.path == dir.join("2002").join("cats"))
+            .unwrap();
+        assert!(!cats.has_child_folders);
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }
