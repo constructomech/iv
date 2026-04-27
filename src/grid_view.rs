@@ -18,7 +18,7 @@ use std::thread;
 
 use crate::app::DecodedImage;
 use crate::decode;
-use crate::grid::{Grid, GridConfig, GridEventKind, TileState};
+use crate::grid::{Grid, GridConfig, GridEventKind, SortMode, TileState};
 
 /// Returns true if IV_DEBUG env var is set to a truthy value.
 fn debug_mode() -> bool {
@@ -897,15 +897,7 @@ impl GridView {
         let deadline =
             frame_start + std::time::Duration::from_secs_f64(FRAME_WORK_BUDGET_MS / 1000.0);
 
-        // Handle keyboard shortcuts
-        if ctx.input(|i| i.key_pressed(egui::Key::S)) {
-            use crate::grid::SortMode;
-            let new_mode = match self.grid.sort_mode() {
-                SortMode::Name => SortMode::DateTaken,
-                SortMode::DateTaken => SortMode::Name,
-            };
-            self.grid.set_sort_mode(new_mode);
-        }
+        let keyboard_scroll_y = self.handle_keyboard_navigation(ctx);
         let poll_start = std::time::Instant::now();
         let results_processed = self.poll_results(ctx, &deadline);
         let results_pending = self.result_rx.len();
@@ -926,107 +918,112 @@ impl GridView {
         let mut clicked = None;
 
         let sched_render_start = std::time::Instant::now();
-        egui::ScrollArea::vertical()
+        let scroll_area = egui::ScrollArea::vertical()
             .auto_shrink([false; 2])
-            .max_height(available_for_grid)
-            .show(ui, |ui| {
-                self.grid
-                    .set_viewport_size(available_width, ui.clip_rect().height());
-                let scroll_offset = ui.clip_rect().min.y - ui.min_rect().min.y;
-                self.grid.set_scroll(scroll_offset);
+            .max_height(available_for_grid);
+        let scroll_area = if let Some(scroll_y) = keyboard_scroll_y {
+            scroll_area.vertical_scroll_offset(scroll_y)
+        } else {
+            scroll_area
+        };
+        scroll_area.show(ui, |ui| {
+            self.grid
+                .set_viewport_size(available_width, ui.clip_rect().height());
+            let scroll_offset = ui.clip_rect().min.y - ui.min_rect().min.y;
+            self.grid.set_scroll(scroll_offset);
 
-                self.check_scroll_generation();
-                self.schedule_work(&deadline);
+            self.check_scroll_generation();
+            self.schedule_work(&deadline);
 
-                let cols = self.grid.cols();
-                let total_rows = self.grid.total_rows();
-                let vr = self.grid.visible_rows();
+            let cols = self.grid.cols();
+            let total_rows = self.grid.total_rows();
+            let vr = self.grid.visible_rows();
 
-                let render_first = vr.first.saturating_sub(2);
-                let render_last = (vr.last + 2).min(total_rows);
+            let render_first = vr.first.saturating_sub(2);
+            let render_last = (vr.last + 2).min(total_rows);
 
-                ui.spacing_mut().item_spacing.y = 0.0;
+            ui.spacing_mut().item_spacing.y = 0.0;
 
-                if render_first > 0 {
-                    ui.allocate_space(egui::vec2(available_width, render_first as f32 * cell_h));
-                }
+            if render_first > 0 {
+                ui.allocate_space(egui::vec2(available_width, render_first as f32 * cell_h));
+            }
 
-                let tile_count = self.grid.tile_count();
-                let debug = self.debug;
-                let sep_row = self.grid.separator_row();
-                let sorted_count = self.grid.sorted_count();
-                let display_order = self.grid.display_order();
+            let tile_count = self.grid.tile_count();
+            let debug = self.debug;
+            let sep_row = self.grid.separator_row();
+            let sorted_count = self.grid.sorted_count();
+            let display_order = self.grid.display_order();
 
-                for row in render_first..render_last {
-                    // Check if this is the separator row
-                    if sep_row == Some(row) {
-                        ui.horizontal(|ui| {
-                            ui.add_space(4.0);
-                            ui.label(
-                                egui::RichText::new("Loading order metadata…")
-                                    .color(egui::Color32::from_rgb(140, 140, 140))
-                                    .size(12.0)
-                                    .italics(),
-                            );
-                        });
-                        ui.allocate_space(egui::vec2(0.0, padding));
-                        continue;
-                    }
-
-                    // Map visual row to display-order position range
-                    let (disp_start, disp_end) = match sep_row {
-                        Some(sep) if row > sep => {
-                            let offset = (row - sep - 1) * cols;
-                            let start = sorted_count + offset;
-                            let end = (start + cols).min(tile_count);
-                            (start, end)
-                        }
-                        _ => {
-                            let start = row * cols;
-                            let end = if sep_row.is_some() {
-                                (start + cols).min(sorted_count)
-                            } else {
-                                (start + cols).min(tile_count)
-                            };
-                            (start, end)
-                        }
-                    };
-
-                    if disp_start >= disp_end {
-                        ui.allocate_space(egui::vec2(0.0, cell_h));
-                        continue;
-                    }
-
+            for row in render_first..render_last {
+                // Check if this is the separator row
+                if sep_row == Some(row) {
                     ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing = egui::vec2(padding, 0.0);
-                        for (pos, &idx) in display_order
-                            .iter()
-                            .enumerate()
-                            .take(disp_end)
-                            .skip(disp_start)
-                        {
-                            let state = self.grid.tile_state(idx);
-                            let name = self.grid.tile_name(idx);
-                            let texture = self.textures.get(idx).and_then(|t| t.as_ref());
-                            let timing = self.timings.get(idx);
-                            let response = Self::render_tile(
-                                ui, idx, name, state, texture, timing, tile_w, tile_h, debug,
-                            );
-                            if response.clicked() {
-                                clicked = Some(pos);
-                            }
-                        }
+                        ui.add_space(4.0);
+                        ui.label(
+                            egui::RichText::new("Loading order metadata…")
+                                .color(egui::Color32::from_rgb(140, 140, 140))
+                                .size(12.0)
+                                .italics(),
+                        );
                     });
                     ui.allocate_space(egui::vec2(0.0, padding));
+                    continue;
                 }
 
-                if render_last < total_rows {
-                    ui.allocate_space(egui::vec2(
-                        available_width,
-                        (total_rows - render_last) as f32 * cell_h,
-                    ));
+                // Map visual row to display-order position range
+                let (disp_start, disp_end) = match sep_row {
+                    Some(sep) if row > sep => {
+                        let offset = (row - sep - 1) * cols;
+                        let start = sorted_count + offset;
+                        let end = (start + cols).min(tile_count);
+                        (start, end)
+                    }
+                    _ => {
+                        let start = row * cols;
+                        let end = if sep_row.is_some() {
+                            (start + cols).min(sorted_count)
+                        } else {
+                            (start + cols).min(tile_count)
+                        };
+                        (start, end)
+                    }
+                };
+
+                if disp_start >= disp_end {
+                    ui.allocate_space(egui::vec2(0.0, cell_h));
+                    continue;
                 }
-            });
+
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing = egui::vec2(padding, 0.0);
+                    for (pos, &idx) in display_order
+                        .iter()
+                        .enumerate()
+                        .take(disp_end)
+                        .skip(disp_start)
+                    {
+                        let state = self.grid.tile_state(idx);
+                        let name = self.grid.tile_name(idx);
+                        let texture = self.textures.get(idx).and_then(|t| t.as_ref());
+                        let timing = self.timings.get(idx);
+                        let response = Self::render_tile(
+                            ui, idx, name, state, texture, timing, tile_w, tile_h, debug,
+                        );
+                        if response.clicked() {
+                            clicked = Some(pos);
+                        }
+                    }
+                });
+                ui.allocate_space(egui::vec2(0.0, padding));
+            }
+
+            if render_last < total_rows {
+                ui.allocate_space(egui::vec2(
+                    available_width,
+                    (total_rows - render_last) as f32 * cell_h,
+                ));
+            }
+        });
 
         // Status bar at bottom: tile size slider (left) + item count (right)
         ui.add_space(4.0);
@@ -1050,16 +1047,7 @@ impl GridView {
                         .color(egui::Color32::from_rgb(160, 160, 160))
                         .size(12.0),
                 );
-                // Sort mode indicator
-                let sort_label = match self.grid.sort_mode() {
-                    crate::grid::SortMode::Name => "A→Z",
-                    crate::grid::SortMode::DateTaken => "Date",
-                };
-                ui.label(
-                    egui::RichText::new(format!("[S] {sort_label}"))
-                        .color(egui::Color32::from_rgb(120, 120, 120))
-                        .size(11.0),
-                );
+                self.sort_mode_dropdown(ui);
             });
         });
 
@@ -1103,6 +1091,64 @@ impl GridView {
         }
 
         clicked
+    }
+
+    fn handle_keyboard_navigation(&mut self, ctx: &egui::Context) -> Option<f32> {
+        let page = self
+            .grid
+            .viewport()
+            .height
+            .max(self.grid.config().cell_height());
+        let current = self.grid.scroll_y();
+        let target = ctx.input(|input| {
+            if input.key_pressed(egui::Key::Home) {
+                Some(0.0)
+            } else if input.key_pressed(egui::Key::End) {
+                Some(self.grid.content_height())
+            } else if input.key_pressed(egui::Key::PageUp) {
+                Some(current - page)
+            } else if input.key_pressed(egui::Key::PageDown) {
+                Some(current + page)
+            } else {
+                None
+            }
+        });
+
+        target.map(|scroll_y| {
+            self.grid.set_scroll(scroll_y);
+            ctx.request_repaint();
+            self.grid.scroll_y()
+        })
+    }
+
+    fn sort_mode_dropdown(&mut self, ui: &mut egui::Ui) {
+        let current = self.grid.sort_mode();
+        let mut mode = self.grid.sort_mode();
+        egui::ComboBox::from_id_salt("grid_sort_mode")
+            .selected_text(format!("Sort: {}", Self::sort_mode_label(mode)))
+            .show_ui(ui, |ui| {
+                ui.selectable_value(
+                    &mut mode,
+                    SortMode::Name,
+                    Self::sort_mode_label(SortMode::Name),
+                );
+                ui.selectable_value(
+                    &mut mode,
+                    SortMode::DateTaken,
+                    Self::sort_mode_label(SortMode::DateTaken),
+                );
+            });
+        if mode != current {
+            self.grid.set_sort_mode(mode);
+            ui.ctx().request_repaint();
+        }
+    }
+
+    fn sort_mode_label(mode: SortMode) -> &'static str {
+        match mode {
+            SortMode::Name => "Name",
+            SortMode::DateTaken => "Date taken",
+        }
     }
 
     /// Render a single tile.
