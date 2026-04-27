@@ -5,12 +5,15 @@ use std::env;
 use std::path::PathBuf;
 use std::process;
 
+use eframe::egui;
+
 rust_i18n::i18n!("locales", fallback = "en");
 
 mod app;
 mod decode;
 mod develop;
 mod enumerator;
+mod folder_tree;
 mod grid;
 mod grid_view;
 mod image_view;
@@ -87,35 +90,72 @@ enum AppMode {
 /// The iv application.
 struct IvApp {
     grid_view: grid_view::GridView,
+    folder_tree: folder_tree::FolderTree,
     enum_handle: Option<enumerator::EnumHandle>,
     enum_done: bool,
+    current_folder: PathBuf,
+    folder_pane_open: bool,
+    log_enabled: bool,
     mode: AppMode,
 }
 
 impl IvApp {
     fn new_folder(path: PathBuf, log_enabled: bool) -> Self {
-        let mut grid = grid::Grid::new(grid::GridConfig::default());
-        if log_enabled {
-            grid.enable_logging();
-        }
+        let grid = Self::new_grid(log_enabled);
         Self {
             grid_view: grid_view::GridView::new(grid),
-            enum_handle: Some(enumerator::enumerate_folder(path)),
+            folder_tree: folder_tree::FolderTree::new(path.clone()),
+            enum_handle: Some(enumerator::enumerate_folder(path.clone())),
             enum_done: false,
+            current_folder: path,
+            folder_pane_open: false,
+            log_enabled,
             mode: AppMode::Grid,
         }
     }
 
-    fn new_image(path: PathBuf, _log_enabled: bool) -> Self {
-        let mut grid = grid::Grid::new(grid::GridConfig::default());
+    fn new_image(path: PathBuf, log_enabled: bool) -> Self {
+        let mut grid = Self::new_grid(log_enabled);
         let idx = grid.add_tile_with_path(path);
         let paths = grid.all_paths();
+        let current_folder = paths
+            .first()
+            .and_then(|path| path.parent())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("."));
         Self {
             grid_view: grid_view::GridView::new(grid),
+            folder_tree: folder_tree::FolderTree::new(current_folder.clone()),
             enum_handle: None,
             enum_done: true,
+            current_folder,
+            folder_pane_open: false,
+            log_enabled,
             mode: AppMode::Image(Box::new(image_view::ImageView::new(paths, idx))),
         }
+    }
+
+    fn new_grid(log_enabled: bool) -> grid::Grid {
+        let mut grid = grid::Grid::new(grid::GridConfig::default());
+        if log_enabled {
+            grid.enable_logging();
+        }
+        grid
+    }
+
+    fn open_folder(&mut self, path: PathBuf) {
+        if path == self.current_folder {
+            return;
+        }
+        let sort_mode = self.grid_view.grid().sort_mode();
+        let mut grid = Self::new_grid(self.log_enabled);
+        grid.set_sort_mode(sort_mode);
+        self.grid_view.replace_grid(grid);
+        self.enum_handle = Some(enumerator::enumerate_folder(path.clone()));
+        self.enum_done = false;
+        self.current_folder = path.clone();
+        self.folder_tree.set_selected(path);
+        self.mode = AppMode::Grid;
     }
 
     fn poll_enumerator(&mut self) {
@@ -146,6 +186,71 @@ impl IvApp {
             self.enum_handle = None;
         }
     }
+
+    fn show_grid_mode(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
+        if self.folder_pane_open {
+            egui::SidePanel::left("iv_folder_tree_pane")
+                .resizable(true)
+                .default_width(260.0)
+                .width_range(180.0..=420.0)
+                .show_inside(ui, |ui| {
+                    self.show_folder_pane(ui);
+                });
+        }
+
+        self.show_folder_bar(ui);
+
+        if let Some(clicked_idx) = self.grid_view.show(ctx, ui) {
+            let paths = self.grid_view.grid().all_paths();
+            if !paths.is_empty() && clicked_idx < paths.len() {
+                self.mode =
+                    AppMode::Image(Box::new(image_view::ImageView::new(paths, clicked_idx)));
+            }
+        }
+    }
+
+    fn show_folder_pane(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new("Folders")
+                    .color(egui::Color32::from_rgb(210, 210, 210))
+                    .size(14.0)
+                    .strong(),
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .add_sized([22.0, 20.0], egui::Button::new("‹"))
+                    .on_hover_text("Hide folders")
+                    .clicked()
+                {
+                    self.folder_pane_open = false;
+                }
+            });
+        });
+        ui.separator();
+        if let Some(path) = self.folder_tree.show(ui) {
+            self.open_folder(path);
+        }
+    }
+
+    fn show_folder_bar(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            if !self.folder_pane_open
+                && ui
+                    .add_sized([22.0, 20.0], egui::Button::new("›"))
+                    .on_hover_text("Show folders")
+                    .clicked()
+            {
+                self.folder_pane_open = true;
+            }
+            ui.label(
+                egui::RichText::new(self.current_folder.display().to_string())
+                    .color(egui::Color32::from_rgb(160, 160, 160))
+                    .size(12.0),
+            );
+        });
+        ui.add_space(4.0);
+    }
 }
 
 impl eframe::App for IvApp {
@@ -164,15 +269,7 @@ impl eframe::App for IvApp {
             )
             .show(ctx, |ui| match &mut self.mode {
                 AppMode::Grid => {
-                    if let Some(clicked_idx) = self.grid_view.show(ctx, ui) {
-                        let paths = self.grid_view.grid().all_paths();
-                        if !paths.is_empty() && clicked_idx < paths.len() {
-                            self.mode = AppMode::Image(Box::new(image_view::ImageView::new(
-                                paths,
-                                clicked_idx,
-                            )));
-                        }
-                    }
+                    self.show_grid_mode(ctx, ui);
                 }
                 AppMode::Image(view) => {
                     let go_back = view.show(ctx, ui);

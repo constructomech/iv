@@ -152,29 +152,50 @@ enum WorkResult {
         idx: usize,
         image: DecodedImage,
         ms: f64,
+        generation: u64,
     },
     /// No embedded thumbnail found. Includes file bytes for reuse.
     EmbeddedMiss {
         idx: usize,
         ms: f64,
         data: Option<Vec<u8>>,
+        generation: u64,
     },
     /// Full decode completed.
     FullOk {
         idx: usize,
         image: DecodedImage,
         ms: f64,
+        generation: u64,
     },
     /// Upscale decode completed.
     UpscaleOk {
         idx: usize,
         image: DecodedImage,
         ms: f64,
+        generation: u64,
     },
     /// Date-taken metadata extracted.
-    DateScanned { idx: usize, date: Option<String> },
+    DateScanned {
+        idx: usize,
+        date: Option<String>,
+        generation: u64,
+    },
     /// Decode failed.
-    Failed { idx: usize },
+    Failed { idx: usize, generation: u64 },
+}
+
+impl WorkResult {
+    fn generation(&self) -> u64 {
+        match self {
+            WorkResult::EmbeddedOk { generation, .. }
+            | WorkResult::EmbeddedMiss { generation, .. }
+            | WorkResult::FullOk { generation, .. }
+            | WorkResult::UpscaleOk { generation, .. }
+            | WorkResult::DateScanned { generation, .. }
+            | WorkResult::Failed { generation, .. } => *generation,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -275,6 +296,7 @@ impl GridView {
                                             idx: req.idx,
                                             image,
                                             ms,
+                                            generation: req.generation,
                                         });
                                     }
                                     None => {
@@ -289,6 +311,7 @@ impl GridView {
                                             idx: req.idx,
                                             ms,
                                             data,
+                                            generation: req.generation,
                                         });
                                     }
                                 }
@@ -306,10 +329,14 @@ impl GridView {
                                             idx: req.idx,
                                             image,
                                             ms,
+                                            generation: req.generation,
                                         });
                                     }
                                     Err(_) => {
-                                        let _ = result_tx.send(WorkResult::Failed { idx: req.idx });
+                                        let _ = result_tx.send(WorkResult::Failed {
+                                            idx: req.idx,
+                                            generation: req.generation,
+                                        });
                                     }
                                 }
                             }
@@ -328,17 +355,24 @@ impl GridView {
                                             idx: req.idx,
                                             image,
                                             ms,
+                                            generation: req.generation,
                                         });
                                     }
                                     None => {
-                                        let _ = result_tx.send(WorkResult::Failed { idx: req.idx });
+                                        let _ = result_tx.send(WorkResult::Failed {
+                                            idx: req.idx,
+                                            generation: req.generation,
+                                        });
                                     }
                                 }
                             }
                             WorkTier::DateScan => {
                                 let date = decode::read_date_taken_from_path(&req.path, &req.data);
-                                let _ =
-                                    result_tx.send(WorkResult::DateScanned { idx: req.idx, date });
+                                let _ = result_tx.send(WorkResult::DateScanned {
+                                    idx: req.idx,
+                                    date,
+                                    generation: req.generation,
+                                });
                             }
                         }
                     }
@@ -386,6 +420,26 @@ impl GridView {
         &mut self.grid
     }
 
+    /// Replace the displayed folder contents while keeping worker threads alive.
+    pub fn replace_grid(&mut self, mut grid: Grid) {
+        let new_generation = self.generation.fetch_add(1, Ordering::Relaxed) + 1;
+        while self.decode_rx.try_recv().is_ok() {}
+        while self.result_rx.try_recv().is_ok() {}
+
+        grid.set_tile_size(self.tile_size, self.tile_size);
+        self.grid = grid;
+        self.textures.clear();
+        self.decoded_sizes.clear();
+        self.upgrading.clear();
+        self.date_scanning.clear();
+        self.timings.clear();
+        self.cached_data.clear();
+        self.last_scroll_y = 0.0;
+        self.grid.record_event(GridEventKind::GenerationBump {
+            generation: new_generation,
+        });
+    }
+
     // -- Result polling -----------------------------------------------------
 
     fn ensure_vecs(&mut self, idx: usize) {
@@ -415,8 +469,12 @@ impl GridView {
             };
             processed += 1;
 
+            if result.generation() < self.generation.load(Ordering::Relaxed) {
+                continue;
+            }
+
             match result {
-                WorkResult::EmbeddedOk { idx, image, ms } => {
+                WorkResult::EmbeddedOk { idx, image, ms, .. } => {
                     if idx < self.grid.tile_count() {
                         self.ensure_vecs(idx);
                         let size = [image.width as usize, image.height as usize];
@@ -436,7 +494,7 @@ impl GridView {
                         self.grid.set_tile_state(idx, TileState::Loaded);
                     }
                 }
-                WorkResult::EmbeddedMiss { idx, ms, data } => {
+                WorkResult::EmbeddedMiss { idx, ms, data, .. } => {
                     if idx < self.grid.tile_count() {
                         self.ensure_vecs(idx);
                         self.timings[idx].embedded_ms = ms;
@@ -451,7 +509,7 @@ impl GridView {
                         self.grid.set_tile_state(idx, TileState::EmbeddedMissed);
                     }
                 }
-                WorkResult::FullOk { idx, image, ms } => {
+                WorkResult::FullOk { idx, image, ms, .. } => {
                     if idx < self.grid.tile_count() {
                         self.ensure_vecs(idx);
                         let size = [image.width as usize, image.height as usize];
@@ -471,7 +529,7 @@ impl GridView {
                         self.grid.set_tile_state(idx, TileState::Loaded);
                     }
                 }
-                WorkResult::Failed { idx } => {
+                WorkResult::Failed { idx, .. } => {
                     if idx < self.grid.tile_count() {
                         self.ensure_vecs(idx);
                         self.upgrading.remove(&idx);
@@ -482,7 +540,7 @@ impl GridView {
                         });
                     }
                 }
-                WorkResult::UpscaleOk { idx, image, ms } => {
+                WorkResult::UpscaleOk { idx, image, ms, .. } => {
                     if idx < self.grid.tile_count() {
                         self.ensure_vecs(idx);
                         let size = [image.width as usize, image.height as usize];
@@ -501,7 +559,7 @@ impl GridView {
                         });
                     }
                 }
-                WorkResult::DateScanned { idx, date } => {
+                WorkResult::DateScanned { idx, date, .. } => {
                     if idx < self.grid.tile_count() {
                         self.date_scanning.remove(&idx);
                         if date.is_some() {

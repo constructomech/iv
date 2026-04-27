@@ -21,6 +21,9 @@ extraction pipeline.
   with 30 unit tests.
 - **GridView**: Owns the Grid, GPU textures, and a pool of decode workers.
   Drives the tile state machine each frame. Renders only visible rows.
+- **FolderTree**: In-memory, lazy folder browser for the left pane. It does
+  not persist a catalog; expanding a folder reads only that folder's immediate
+  child directories on a background thread.
 - **egui**: Immediate-mode GUI. GridView uses `ScrollArea` with manual row
   layout — only visible rows ± 2 buffer rows are rendered.
 
@@ -214,9 +217,32 @@ A shared `AtomicU64` generation counter invalidates stale work:
 `poll_results()` runs at the start of each frame, processing up to 16
 results. Each image result triggers a texture upload (`ctx.load_texture`) and
 a state transition. `DateScanned` results update the Grid's display order when
-date sorting is active. Results for tiles that have already been loaded (e.g.,
-from a stale generation) are harmlessly applied — the texture is replaced and
-the state stays `Loaded`.
+date sorting is active. Work results carry the generation they were scheduled
+under; results from older generations are ignored. This prevents in-flight
+thumbnail or metadata work from a previous scroll position or folder selection
+from painting into the current grid.
+
+## Folder Browsing
+
+Folder browsing deliberately avoids a persistent cache or catalog. `IvApp` owns
+a `FolderTree` rooted at the launch folder and renders it in a collapsible left
+pane while in grid mode. The tree stores only expanded UI state for this app
+session. Expanding a node starts a tiny background scan of that directory's
+immediate child folders. No recursive counts, thumbnails, or metadata indexes
+are built. The scan also checks whether each returned child folder has direct
+child folders of its own, so known leaf folders render as plain rows without
+an expand disclosure.
+
+The pane includes an in-memory text filter. Filtering is case-insensitive and
+applies only to folder nodes already loaded in the lazy tree; it does not start
+recursive filesystem searches or build a persistent index.
+
+Selecting a folder replaces the current `Grid` with a fresh one, preserves the
+current tile size and sort mode, and starts the existing non-recursive image
+enumerator for that folder. `GridView::replace_grid()` keeps the decode worker
+pool alive but bumps the generation counter, drains pending work queues, clears
+textures and per-tile timing state, and ignores any stale results that finish
+after the switch.
 
 ## Thumbnail Extraction Pipeline
 
