@@ -610,12 +610,7 @@ impl ImageView {
         let Some(path) = self.current_live_video() else {
             return;
         };
-        if let Err(err) = open::that(path) {
-            log::error!(
-                "Failed to open Live Photo movie {} with OS default player: {err}",
-                path.display()
-            );
-        }
+        crate::launcher::open_with_default_app(path);
     }
 
     fn render_info_pane(&mut self, ui: &mut egui::Ui) {

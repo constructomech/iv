@@ -10,6 +10,7 @@ mod enumerator;
 pub mod grid;
 mod grid_view;
 mod image_view;
+mod launcher;
 pub mod media;
 
 pub use app::{DecodedImage, load_image};
