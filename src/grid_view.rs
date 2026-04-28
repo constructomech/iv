@@ -1106,7 +1106,7 @@ impl GridView {
                         let response = Self::render_tile(
                             ui, idx, name, state, texture, timing, tile_w, tile_h, is_video, debug,
                         );
-                        if response.clicked() && !is_video {
+                        if response.clicked() {
                             clicked = Some(pos);
                         }
                     }
@@ -1302,22 +1302,28 @@ impl GridView {
             }
 
             if is_video {
-                let badge_rect = egui::Rect::from_min_size(
-                    egui::pos2(rect.min.x + 6.0, rect.min.y + 6.0),
-                    egui::vec2(48.0, 20.0),
+                let radius = 18.0;
+                let center = egui::pos2(rect.max.x - radius - 8.0, rect.min.y + radius + 8.0);
+                painter.circle_filled(
+                    center,
+                    radius,
+                    egui::Color32::from_rgba_premultiplied(0, 0, 0, 160),
                 );
-                painter.rect_filled(
-                    badge_rect,
-                    3.0,
-                    egui::Color32::from_rgba_premultiplied(0, 0, 0, 170),
+                painter.circle_stroke(
+                    center,
+                    radius,
+                    egui::Stroke::new(1.5, egui::Color32::from_rgb(235, 235, 235)),
                 );
-                painter.text(
-                    badge_rect.center(),
-                    egui::Align2::CENTER_CENTER,
-                    "VIDEO",
-                    egui::FontId::monospace(9.0),
-                    egui::Color32::from_rgb(235, 235, 235),
-                );
+                let triangle = vec![
+                    egui::pos2(center.x - 5.0, center.y - 8.0),
+                    egui::pos2(center.x - 5.0, center.y + 8.0),
+                    egui::pos2(center.x + 8.0, center.y),
+                ];
+                painter.add(egui::Shape::convex_polygon(
+                    triangle,
+                    egui::Color32::from_rgb(245, 245, 245),
+                    egui::Stroke::NONE,
+                ));
                 if state == TileState::Failed && texture.is_none() {
                     painter.text(
                         rect.center(),

@@ -28,6 +28,7 @@ log = "0.4"
 env_logger = "0.11"
 rust-i18n = "3"
 libheif-rs = { version = "2.7", default-features = false, features = ["image", "v1_17"] }
+open = "5"
 
 [build-dependencies]
 cc = "1"

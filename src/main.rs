@@ -203,6 +203,23 @@ impl IvApp {
         self.show_folder_bar(ui);
 
         if let Some(clicked_idx) = self.grid_view.show(ctx, ui) {
+            if let Some(path) = self
+                .grid_view
+                .grid()
+                .all_paths_with_positions()
+                .into_iter()
+                .find_map(|(pos, path)| (pos == clicked_idx).then_some(path))
+                && media::is_video_file(&path)
+            {
+                if let Err(err) = open::that(&path) {
+                    log::error!(
+                        "Failed to open video {} with OS default player: {err}",
+                        path.display()
+                    );
+                }
+                return;
+            }
+
             let paths_with_positions: Vec<_> = self
                 .grid_view
                 .grid()
