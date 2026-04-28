@@ -243,11 +243,17 @@ matches can appear gradually while the user types. The scan still does not read
 image files, thumbnails, or metadata, and it does not build a persistent index.
 
 Selecting a folder replaces the current `Grid` with a fresh one, preserves the
-current tile size and sort mode, and starts the existing non-recursive image
+current tile size and sort mode, and starts the existing non-recursive media
 enumerator for that folder. `GridView::replace_grid()` keeps the decode worker
 pool alive but bumps the generation counter, drains pending work queues, clears
 textures and per-tile timing state, and ignores any stale results that finish
 after the switch.
+
+The enumerator pairs iPhone Live Photos by matching same-directory, same-stem
+image/video files such as `IMG_0001.HEIC` and `IMG_0001.MOV`. The image remains
+the primary grid tile and stores the paired movie path; the standalone movie tile
+is suppressed. If the movie is discovered after the image, the enumerator emits a
+second update for the existing image tile rather than adding a duplicate.
 
 ## Thumbnail Extraction Pipeline
 
@@ -278,8 +284,10 @@ same grid but use a separate `VideoThumbnail` work tier. The worker invokes
 stdout, then converts that frame to the existing RGBA `DecodedImage` texture
 path. If `ffmpeg` is missing or the codec is unsupported, the tile transitions
 to `Failed` and remains visible with a video/error placeholder. Video thumbnails
-are scheduled only for visible tiles and are not used by date sorting or image
-view navigation.
+are scheduled only for visible tiles and are not used by date sorting. Standalone
+video tiles launch the OS default video player when clicked. Live Photo image
+tiles show a `Live Image` badge and the full image view exposes a `Live` play
+button that launches the paired movie.
 
 **Typical timing**: 40–80ms on local SSD, 100–300ms on network (SMB).
 The bottleneck is I/O latency, not decode time.

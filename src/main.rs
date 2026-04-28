@@ -119,7 +119,11 @@ impl IvApp {
     fn new_image(path: PathBuf, log_enabled: bool) -> Self {
         let mut grid = Self::new_grid(log_enabled);
         let idx = grid.add_tile_with_path(path);
+        if let Some(live_video) = media::find_live_video_for_image(grid.tile_path(idx)) {
+            grid.set_tile_live_video(idx, live_video);
+        }
         let paths = grid.all_paths();
+        let live_videos = vec![grid.tile_live_video(idx).map(PathBuf::from)];
         let current_folder = paths
             .first()
             .and_then(|path| path.parent())
@@ -133,7 +137,11 @@ impl IvApp {
             current_folder,
             folder_pane_open: false,
             log_enabled,
-            mode: AppMode::Image(Box::new(image_view::ImageView::new(paths, idx))),
+            mode: AppMode::Image(Box::new(image_view::ImageView::new(
+                paths,
+                live_videos,
+                idx,
+            ))),
         }
     }
 
@@ -164,8 +172,14 @@ impl IvApp {
         if let Some(ref handle) = self.enum_handle {
             loop {
                 match handle.receiver.try_recv() {
-                    Ok(enumerator::EnumMessage::Found(path)) => {
-                        self.grid_view.grid_mut().add_tile_with_path(path);
+                    Ok(enumerator::EnumMessage::Found { path, live_video }) => {
+                        let grid = self.grid_view.grid_mut();
+                        let idx = grid
+                            .find_tile_by_path(&path)
+                            .unwrap_or_else(|| grid.add_tile_with_path(path));
+                        if let Some(live_video) = live_video {
+                            grid.set_tile_live_video(idx, live_video);
+                        }
                     }
                     Ok(enumerator::EnumMessage::Done(_)) => {
                         self.enum_done = true;
@@ -223,20 +237,27 @@ impl IvApp {
             let paths_with_positions: Vec<_> = self
                 .grid_view
                 .grid()
-                .all_paths_with_positions()
+                .all_paths_with_live_videos()
                 .into_iter()
-                .filter(|(_, path)| media::is_image_file(path))
+                .filter(|(_, path, _)| media::is_image_file(path))
                 .collect();
             let image_index = paths_with_positions
                 .iter()
-                .position(|(pos, _)| *pos == clicked_idx);
+                .position(|(pos, _, _)| *pos == clicked_idx);
             if let Some(image_index) = image_index {
+                let live_videos = paths_with_positions
+                    .iter()
+                    .map(|(_, _, live_video)| live_video.clone())
+                    .collect();
                 let paths = paths_with_positions
                     .into_iter()
-                    .map(|(_, path)| path)
+                    .map(|(_, path, _)| path)
                     .collect();
-                self.mode =
-                    AppMode::Image(Box::new(image_view::ImageView::new(paths, image_index)));
+                self.mode = AppMode::Image(Box::new(image_view::ImageView::new(
+                    paths,
+                    live_videos,
+                    image_index,
+                )));
             }
         }
     }

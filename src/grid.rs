@@ -166,6 +166,8 @@ pub struct Grid {
     paths: Vec<PathBuf>,
     /// Per-tile EXIF date-taken string (e.g. "2023:04:15 14:30:00").
     dates: Vec<Option<String>>,
+    /// Paired Live Photo movie path for image tiles.
+    live_videos: Vec<Option<PathBuf>>,
     /// Display order: maps display position → tile index.
     /// In Name mode this is the identity mapping (0, 1, 2, …).
     /// In DateTaken mode the first `sorted_count` entries are date-sorted,
@@ -194,6 +196,7 @@ impl Grid {
             names: Vec::new(),
             paths: Vec::new(),
             dates: Vec::new(),
+            live_videos: Vec::new(),
             display_order: Vec::new(),
             sorted_count: 0,
             sort_mode: SortMode::Name,
@@ -310,6 +313,7 @@ impl Grid {
         self.names.push(name.into());
         self.paths.push(PathBuf::new());
         self.dates.push(None);
+        self.live_videos.push(None);
         self.display_order.push(idx);
         idx
     }
@@ -326,6 +330,7 @@ impl Grid {
         self.names.push(name);
         self.paths.push(path);
         self.dates.push(None);
+        self.live_videos.push(None);
         // In DateTaken mode, new tiles go into the unsorted section (after sorted_count).
         // In Name mode, identity mapping — new tile goes at the end.
         self.display_order.push(idx);
@@ -370,6 +375,18 @@ impl Grid {
     /// Get the file path of a tile.
     pub fn tile_path(&self, idx: usize) -> &Path {
         &self.paths[idx]
+    }
+
+    pub fn tile_live_video(&self, idx: usize) -> Option<&Path> {
+        self.live_videos[idx].as_deref()
+    }
+
+    pub fn set_tile_live_video(&mut self, idx: usize, path: PathBuf) {
+        self.live_videos[idx] = Some(path);
+    }
+
+    pub fn find_tile_by_path(&self, path: &Path) -> Option<usize> {
+        self.paths.iter().position(|candidate| candidate == path)
     }
 
     /// Get visible tile indices that are in the given state.
@@ -726,6 +743,14 @@ impl Grid {
             .iter()
             .enumerate()
             .map(|(pos, &idx)| (pos, self.paths[idx].clone()))
+            .collect()
+    }
+
+    pub fn all_paths_with_live_videos(&self) -> Vec<(usize, PathBuf, Option<PathBuf>)> {
+        self.display_order
+            .iter()
+            .enumerate()
+            .map(|(pos, &idx)| (pos, self.paths[idx].clone(), self.live_videos[idx].clone()))
             .collect()
     }
 }
@@ -1611,5 +1636,18 @@ mod tests {
         assert_eq!(paths[0].to_str().unwrap(), "a.jpg");
         assert_eq!(paths[1].to_str().unwrap(), "b.jpg");
         assert_eq!(paths[2].to_str().unwrap(), "c.jpg");
+    }
+
+    #[test]
+    fn live_video_tracks_tile() {
+        let mut g = Grid::new(GridConfig::default());
+        let idx = g.add_tile_with_path("IMG_0001.HEIC".into());
+        g.set_tile_live_video(idx, "IMG_0001.MOV".into());
+
+        assert_eq!(g.find_tile_by_path(Path::new("IMG_0001.HEIC")), Some(idx));
+        assert_eq!(
+            g.tile_live_video(idx).and_then(Path::to_str),
+            Some("IMG_0001.MOV")
+        );
     }
 }

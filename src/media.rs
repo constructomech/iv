@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MediaKind {
@@ -50,6 +50,32 @@ pub fn is_media_file(path: &Path) -> bool {
     media_kind_for_path(path).is_some()
 }
 
+pub fn live_photo_key(path: &Path) -> Option<String> {
+    let stem = path.file_stem()?.to_str()?.to_ascii_lowercase();
+    let parent = path
+        .parent()
+        .map(|parent| parent.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
+    Some(format!("{parent}\0{stem}"))
+}
+
+pub fn find_live_video_for_image(path: &Path) -> Option<PathBuf> {
+    if !is_image_file(path) {
+        return None;
+    }
+    let parent = path.parent()?;
+    let stem = path.file_stem()?.to_str()?;
+    for ext in VIDEO_EXTENSIONS {
+        for candidate_ext in [ext.to_ascii_lowercase(), ext.to_ascii_uppercase()] {
+            let candidate = parent.join(format!("{stem}.{candidate_ext}"));
+            if candidate.exists() && is_video_file(&candidate) {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -74,5 +100,13 @@ mod tests {
         assert!(!is_media_file(Path::new("readme.txt")));
         assert!(!is_media_file(Path::new("photo.xmp")));
         assert!(!is_media_file(Path::new("noext")));
+    }
+
+    #[test]
+    fn live_photo_key_matches_same_stem_pairs_case_insensitively() {
+        assert_eq!(
+            live_photo_key(Path::new("C:/Photos/IMG_0001.HEIC")),
+            live_photo_key(Path::new("C:/Photos/img_0001.mov"))
+        );
     }
 }

@@ -1101,10 +1101,21 @@ impl GridView {
                         let state = self.grid.tile_state(idx);
                         let name = self.grid.tile_name(idx);
                         let is_video = media::is_video_file(self.grid.tile_path(idx));
+                        let is_live_photo = self.grid.tile_live_video(idx).is_some();
                         let texture = self.textures.get(idx).and_then(|t| t.as_ref());
                         let timing = self.timings.get(idx);
                         let response = Self::render_tile(
-                            ui, idx, name, state, texture, timing, tile_w, tile_h, is_video, debug,
+                            ui,
+                            idx,
+                            name,
+                            state,
+                            texture,
+                            timing,
+                            tile_w,
+                            tile_h,
+                            is_video,
+                            is_live_photo,
+                            debug,
                         );
                         if response.clicked() {
                             clicked = Some(pos);
@@ -1260,6 +1271,7 @@ impl GridView {
         tile_w: f32,
         tile_h: f32,
         is_video: bool,
+        is_live_photo: bool,
         debug: bool,
     ) -> egui::Response {
         let desired_size = egui::vec2(tile_w, tile_h);
@@ -1333,6 +1345,25 @@ impl GridView {
                         egui::Color32::from_rgb(210, 160, 160),
                     );
                 }
+            }
+
+            if is_live_photo {
+                let badge_rect = egui::Rect::from_min_size(
+                    egui::pos2(rect.min.x + 6.0, rect.min.y + 6.0),
+                    egui::vec2(68.0, 20.0),
+                );
+                painter.rect_filled(
+                    badge_rect,
+                    3.0,
+                    egui::Color32::from_rgba_premultiplied(0, 0, 0, 170),
+                );
+                painter.text(
+                    badge_rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    "Live Image",
+                    egui::FontId::monospace(9.0),
+                    egui::Color32::from_rgb(235, 235, 235),
+                );
             }
 
             // Hover/click highlight — subtle alpha brightening

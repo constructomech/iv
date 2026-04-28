@@ -1,13 +1,17 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::thread;
 
-use crate::media::is_media_file;
+use crate::media::{self, MediaKind};
 
 /// Messages sent from the enumerator thread to the UI.
 pub enum EnumMessage {
-    /// A new image file was discovered.
-    Found(PathBuf),
+    /// A new media file was discovered.
+    Found {
+        path: PathBuf,
+        live_video: Option<PathBuf>,
+    },
     /// Enumeration is complete. Contains total count.
     Done(usize),
     /// An error occurred during enumeration.
@@ -43,10 +47,8 @@ fn enumerate_inner(folder: &Path, tx: &mpsc::Sender<EnumMessage>) {
         }
     };
 
-    // NTFS stores directory entries in a B+ tree sorted by name, so
-    // FindFirstFile/FindNextFile (used by read_dir on Windows) returns
-    // entries in alphabetical order. We stream them directly for
-    // responsiveness — no need to collect and sort.
+    let mut images_by_key = HashMap::new();
+    let mut pending_videos_by_key: HashMap<String, Vec<PathBuf>> = HashMap::new();
     let mut count = 0usize;
 
     for entry in entries {
@@ -62,10 +64,63 @@ fn enumerate_inner(folder: &Path, tx: &mpsc::Sender<EnumMessage>) {
 
         // Use file_type() from the directory entry (no extra stat syscall)
         let is_file = entry.file_type().is_ok_and(|ft| ft.is_file());
-        if is_file && is_media_file(&path) {
+        if !is_file {
+            continue;
+        }
+
+        match media::media_kind_for_path(&path) {
+            Some(MediaKind::Image) => {
+                let key = media::live_photo_key(&path);
+                let live_video = key
+                    .as_ref()
+                    .and_then(|key| pending_videos_by_key.remove(key))
+                    .and_then(|mut videos| videos.drain(..).next());
+                if let Some(key) = key {
+                    images_by_key.insert(key, path.clone());
+                }
+                count += 1;
+                if tx.send(EnumMessage::Found { path, live_video }).is_err() {
+                    return; // Receiver dropped, app is shutting down
+                }
+            }
+            Some(MediaKind::Video) => {
+                let Some(key) = media::live_photo_key(&path) else {
+                    count += 1;
+                    if tx
+                        .send(EnumMessage::Found {
+                            path,
+                            live_video: None,
+                        })
+                        .is_err()
+                    {
+                        return;
+                    }
+                    continue;
+                };
+                if let Some(image_path) = images_by_key.get(&key) {
+                    let _ = tx.send(EnumMessage::Found {
+                        path: image_path.clone(),
+                        live_video: Some(path),
+                    });
+                } else {
+                    pending_videos_by_key.entry(key).or_default().push(path);
+                }
+            }
+            None => {}
+        }
+    }
+
+    for paths in pending_videos_by_key.into_values() {
+        for path in paths {
             count += 1;
-            if tx.send(EnumMessage::Found(path)).is_err() {
-                return; // Receiver dropped, app is shutting down
+            if tx
+                .send(EnumMessage::Found {
+                    path,
+                    live_video: None,
+                })
+                .is_err()
+            {
+                return;
             }
         }
     }
@@ -107,7 +162,7 @@ mod tests {
 
         for msg in handle.receiver {
             match msg {
-                EnumMessage::Found(p) => found.push(p),
+                EnumMessage::Found { path, .. } => found.push(path),
                 EnumMessage::Done(c) => {
                     done_count = Some(c);
                     break;
@@ -140,7 +195,7 @@ mod tests {
 
         for msg in handle.receiver {
             match msg {
-                EnumMessage::Found(p) => found.push(p),
+                EnumMessage::Found { path, .. } => found.push(path),
                 EnumMessage::Done(_) => break,
                 EnumMessage::Error(e) => panic!("unexpected error: {e}"),
             }
@@ -153,7 +208,7 @@ mod tests {
     #[test]
     fn enumerates_video_files() {
         let dir = make_test_dir("video");
-        fs::write(dir.join("IMG_0001.MOV"), b"fake mov").unwrap();
+        fs::write(dir.join("clip.MOV"), b"fake mov").unwrap();
         fs::write(dir.join("clip.mp4"), b"fake mp4").unwrap();
         fs::write(dir.join("render.webm"), b"fake webm").unwrap();
         fs::write(dir.join("notes.txt"), b"not media").unwrap();
@@ -163,13 +218,43 @@ mod tests {
 
         for msg in handle.receiver {
             match msg {
-                EnumMessage::Found(p) => found.push(p),
+                EnumMessage::Found { path, .. } => found.push(path),
                 EnumMessage::Done(_) => break,
                 EnumMessage::Error(e) => panic!("unexpected error: {e}"),
             }
         }
 
         assert_eq!(found.len(), 3);
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn pairs_live_photo_image_and_video() {
+        let dir = make_test_dir("live_photo");
+        let image = dir.join("IMG_0001.HEIC");
+        let video = dir.join("IMG_0001.MOV");
+        fs::write(&image, b"fake image").unwrap();
+        fs::write(&video, b"fake video").unwrap();
+
+        let handle = enumerate_folder(dir.clone());
+        let mut found = Vec::new();
+        let mut done_count = None;
+
+        for msg in handle.receiver {
+            match msg {
+                EnumMessage::Found { path, live_video } => found.push((path, live_video)),
+                EnumMessage::Done(count) => {
+                    done_count = Some(count);
+                    break;
+                }
+                EnumMessage::Error(e) => panic!("unexpected error: {e}"),
+            }
+        }
+
+        assert_eq!(done_count, Some(1));
+        assert_eq!(found.len(), 2);
+        assert_eq!(found[0], (image.clone(), None));
+        assert_eq!(found[1], (image, Some(video)));
         cleanup(&dir);
     }
 
@@ -182,7 +267,7 @@ mod tests {
 
         if let Some(msg) = handle.receiver.into_iter().next() {
             match msg {
-                EnumMessage::Found(_) => panic!("should find nothing"),
+                EnumMessage::Found { .. } => panic!("should find nothing"),
                 EnumMessage::Done(c) => {
                     assert_eq!(c, 0);
                     got_done = true;
@@ -222,7 +307,7 @@ mod tests {
 
         for msg in handle.receiver {
             match msg {
-                EnumMessage::Found(p) => found.push(p),
+                EnumMessage::Found { path, .. } => found.push(path),
                 EnumMessage::Done(_) => break,
                 EnumMessage::Error(e) => panic!("unexpected error: {e}"),
             }
@@ -245,7 +330,7 @@ mod tests {
 
         for msg in handle.receiver {
             match msg {
-                EnumMessage::Found(p) => found.push(p),
+                EnumMessage::Found { path, .. } => found.push(path),
                 EnumMessage::Done(_) => break,
                 EnumMessage::Error(e) => panic!("unexpected error: {e}"),
             }
@@ -268,7 +353,7 @@ mod tests {
 
         for msg in handle.receiver {
             match msg {
-                EnumMessage::Found(p) => found.push(p),
+                EnumMessage::Found { path, .. } => found.push(path),
                 EnumMessage::Done(_) => break,
                 EnumMessage::Error(e) => panic!("unexpected error: {e}"),
             }

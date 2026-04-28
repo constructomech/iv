@@ -93,6 +93,8 @@ fn civil_from_days(days_since_unix_epoch: i64) -> (i32, u32, u32) {
 pub struct ImageView {
     /// All image paths in the folder (for left/right navigation).
     paths: Vec<PathBuf>,
+    /// Optional paired Live Photo movie for each image path.
+    live_videos: Vec<Option<PathBuf>>,
     /// Current image index into `paths`.
     current: usize,
     /// Currently displayed texture (or full-res after upgrade).
@@ -130,9 +132,10 @@ pub struct ImageView {
 }
 
 impl ImageView {
-    pub fn new(paths: Vec<PathBuf>, start_index: usize) -> Self {
+    pub fn new(paths: Vec<PathBuf>, live_videos: Vec<Option<PathBuf>>, start_index: usize) -> Self {
         let mut view = Self {
             paths,
+            live_videos,
             current: start_index,
             texture: None,
             preview_texture: None,
@@ -473,6 +476,14 @@ impl ImageView {
                     .color(egui::Color32::from_rgb(180, 180, 180))
                     .size(13.0),
             );
+            if self.current_live_video().is_some()
+                && ui
+                    .add_sized([96.0, 22.0], egui::Button::new("▶ Live"))
+                    .on_hover_text("Play Live Photo movie")
+                    .clicked()
+            {
+                self.open_current_live_video();
+            }
         });
         ui.add_space(4.0);
 
@@ -589,6 +600,22 @@ impl ImageView {
         }
 
         false
+    }
+
+    fn current_live_video(&self) -> Option<&PathBuf> {
+        self.live_videos.get(self.current)?.as_ref()
+    }
+
+    fn open_current_live_video(&self) {
+        let Some(path) = self.current_live_video() else {
+            return;
+        };
+        if let Err(err) = open::that(path) {
+            log::error!(
+                "Failed to open Live Photo movie {} with OS default player: {err}",
+                path.display()
+            );
+        }
     }
 
     fn render_info_pane(&mut self, ui: &mut egui::Ui) {
