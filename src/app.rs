@@ -122,22 +122,6 @@ pub fn fit_size(image_size: (f32, f32), available_size: (f32, f32)) -> (f32, f32
     (iw * scale, ih * scale)
 }
 
-/// Recognized image file extensions (lowercase, without dot).
-pub const IMAGE_EXTENSIONS: &[&str] = &[
-    // Common raster
-    "jpg", "jpeg", "png", "webp", "tiff", "tif", "bmp", "gif", // HEIF/HEIC
-    "heic", "heif", // RAW (first-class — we extract embedded JPEG previews)
-    "dng", "cr2", "cr3", "nef", "arw", "orf", "rw2", "raf",
-];
-
-/// Check whether a path has a recognized image extension.
-pub fn is_image_file(path: &Path) -> bool {
-    path.extension()
-        .and_then(|ext| ext.to_str())
-        .map(|ext| IMAGE_EXTENSIONS.contains(&ext.to_ascii_lowercase().as_str()))
-        .unwrap_or(false)
-}
-
 // ---------------------------------------------------------------------------
 // Unit tests
 // ---------------------------------------------------------------------------
@@ -145,6 +129,7 @@ pub fn is_image_file(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::media::is_image_file;
 
     #[test]
     fn fit_size_smaller_image_no_upscale() {

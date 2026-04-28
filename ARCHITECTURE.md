@@ -151,9 +151,9 @@ It strictly prioritizes phases in order, using a frame-time deadline to
 avoid jank:
 
 **Phase 1**: Find visible tiles in `NotLoaded` state. Send as
-`EmbeddedOnly` work requests. Transition each to `LoadingEmbedded`.
-**Return early** — don't start Phase 2 until no visible `NotLoaded` tiles
-remain.
+`EmbeddedOnly` work requests for images and `VideoThumbnail` work requests for
+videos. Transition each to `LoadingEmbedded`. **Return early** — don't start
+Phase 2 until no visible `NotLoaded` tiles remain.
 
 **Phase 2**: Find visible tiles in `EmbeddedMissed` state. Send as
 `FullDecode` work requests. Transition each to `CreatingThumbnail`.
@@ -167,7 +167,9 @@ to tile size. The upgraded texture replaces the old one in-place.
 An `upgrading` set tracks in-flight upscale requests to prevent duplicates.
 
 **Phase 4**: Preload off-screen `NotLoaded` tiles as `EmbeddedOnly`,
-expanding outward from the visible range so nearby tiles load first.
+expanding outward from the visible range so nearby tiles load first. Video files
+are intentionally skipped here because frame extraction may launch an external
+decoder and should not compete with image thumbnailing for off-screen work.
 
 **Phase 5**: EXIF date-taken metadata scan (only in `DateTaken` sort mode).
 JPEG-like files use a small prefix read. TIFF/DNG files use a seekable reader
@@ -227,11 +229,12 @@ from painting into the current grid.
 Folder browsing deliberately avoids a persistent cache or catalog. `IvApp` owns
 a `FolderTree` rooted at the launch folder and renders it in a collapsible left
 pane while in grid mode. The tree stores only expanded UI state for this app
-session. Expanding a node starts a tiny background scan of that directory's
-immediate child folders. No recursive counts, thumbnails, or metadata indexes
-are built. The scan also checks whether each returned child folder has direct
-child folders of its own, so known leaf folders render as plain rows without
-an expand disclosure.
+session. When launched on a folder that has no direct image files, the pane
+opens immediately so the user can choose a child folder. Expanding a node starts
+a tiny background scan of that directory's immediate child folders. No recursive
+counts, thumbnails, or metadata indexes are built. The scan also checks whether
+each returned child folder has direct child folders of its own, so known leaf
+folders render as plain rows without an expand disclosure.
 
 The pane includes an in-memory text filter. Focusing the search box starts a
 session-only recursive folder scan under the tree root. Discovered folders are
@@ -268,6 +271,15 @@ container, get the primary image handle, check `number_of_thumbnails()`,
 and decode the first thumbnail via `LibHeif::decode()` in RGBA colorspace.
 HEIC files store thumbnails as separate image items in the container (not
 in EXIF tags), so the EXIF approach doesn't work for them.
+
+**Video files**: `.mov`, `.mp4`, and `.webm` entries are enumerated into the
+same grid but use a separate `VideoThumbnail` work tier. The worker invokes
+`ffmpeg` from `PATH`, seeks near the start, decodes a single frame to PNG on
+stdout, then converts that frame to the existing RGBA `DecodedImage` texture
+path. If `ffmpeg` is missing or the codec is unsupported, the tile transitions
+to `Failed` and remains visible with a video/error placeholder. Video thumbnails
+are scheduled only for visible tiles and are not used by date sorting or image
+view navigation.
 
 **Typical timing**: 40–80ms on local SSD, 100–300ms on network (SMB).
 The bottleneck is I/O latency, not decode time.

@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::thread;
 
-use crate::app::is_image_file;
+use crate::media::is_media_file;
 
 /// Messages sent from the enumerator thread to the UI.
 pub enum EnumMessage {
@@ -19,7 +19,7 @@ pub struct EnumHandle {
     pub receiver: mpsc::Receiver<EnumMessage>,
 }
 
-/// Start enumerating image files in `folder` on a background thread.
+/// Start enumerating supported media files in `folder` on a background thread.
 /// Returns immediately with a handle to receive results.
 pub fn enumerate_folder(folder: PathBuf) -> EnumHandle {
     let (tx, rx) = mpsc::channel();
@@ -62,7 +62,7 @@ fn enumerate_inner(folder: &Path, tx: &mpsc::Sender<EnumMessage>) {
 
         // Use file_type() from the directory entry (no extra stat syscall)
         let is_file = entry.file_type().is_ok_and(|ft| ft.is_file());
-        if is_file && is_image_file(&path) {
+        if is_file && is_media_file(&path) {
             count += 1;
             if tx.send(EnumMessage::Found(path)).is_err() {
                 return; // Receiver dropped, app is shutting down
@@ -99,7 +99,7 @@ mod tests {
         fs::write(dir.join("photo.jpg"), b"fake jpg").unwrap();
         fs::write(dir.join("icon.png"), b"fake png").unwrap();
         fs::write(dir.join("readme.txt"), b"not an image").unwrap();
-        fs::write(dir.join("video.mp4"), b"not an image").unwrap();
+        fs::write(dir.join("notes.txt"), b"not an image").unwrap();
 
         let handle = enumerate_folder(dir.clone());
         let mut found = Vec::new();
@@ -134,6 +134,29 @@ mod tests {
         fs::write(dir.join("IMG_001.CR2"), b"fake cr2").unwrap();
         fs::write(dir.join("IMG_002.DNG"), b"fake dng").unwrap();
         fs::write(dir.join("IMG_003.NEF"), b"fake nef").unwrap();
+
+        let handle = enumerate_folder(dir.clone());
+        let mut found = Vec::new();
+
+        for msg in handle.receiver {
+            match msg {
+                EnumMessage::Found(p) => found.push(p),
+                EnumMessage::Done(_) => break,
+                EnumMessage::Error(e) => panic!("unexpected error: {e}"),
+            }
+        }
+
+        assert_eq!(found.len(), 3);
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn enumerates_video_files() {
+        let dir = make_test_dir("video");
+        fs::write(dir.join("IMG_0001.MOV"), b"fake mov").unwrap();
+        fs::write(dir.join("clip.mp4"), b"fake mp4").unwrap();
+        fs::write(dir.join("render.webm"), b"fake webm").unwrap();
+        fs::write(dir.join("notes.txt"), b"not media").unwrap();
 
         let handle = enumerate_folder(dir.clone());
         let mut found = Vec::new();

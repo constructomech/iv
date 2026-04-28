@@ -19,6 +19,7 @@ use std::thread;
 use crate::app::DecodedImage;
 use crate::decode;
 use crate::grid::{Grid, GridConfig, GridEventKind, SortMode, TileState};
+use crate::media;
 
 /// Returns true if IV_DEBUG env var is set to a truthy value.
 fn debug_mode() -> bool {
@@ -130,6 +131,8 @@ enum WorkTier {
     /// Read EXIF date-taken metadata only.
     /// JPEG-like files use a small prefix; TIFF/DNG uses seekable IFD traversal.
     DateScan,
+    /// Extract a thumbnail frame from a video file.
+    VideoThumbnail,
 }
 
 /// A decode request sent from the I/O pool to the decode pool.
@@ -374,6 +377,31 @@ impl GridView {
                                     generation: req.generation,
                                 });
                             }
+                            WorkTier::VideoThumbnail => {
+                                let result =
+                                    decode::decode_video_thumbnail(&req.path, req.target_size);
+                                let ms = start.elapsed().as_secs_f64() * 1000.0;
+                                match result {
+                                    Ok(image) => {
+                                        let _ = result_tx.send(WorkResult::FullOk {
+                                            idx: req.idx,
+                                            image,
+                                            ms,
+                                            generation: req.generation,
+                                        });
+                                    }
+                                    Err(err) => {
+                                        log::warn!(
+                                            "Failed to extract video thumbnail for {}: {err}",
+                                            req.path.display()
+                                        );
+                                        let _ = result_tx.send(WorkResult::Failed {
+                                            idx: req.idx,
+                                            generation: req.generation,
+                                        });
+                                    }
+                                }
+                            }
                         }
                     }
                 })
@@ -538,6 +566,7 @@ impl GridView {
                             kind: "failed".into(),
                             ms: 0.0,
                         });
+                        self.grid.set_tile_state(idx, TileState::Failed);
                     }
                 }
                 WorkResult::UpscaleOk { idx, image, ms, .. } => {
@@ -599,22 +628,20 @@ impl GridView {
                 if path.as_os_str().is_empty() {
                     continue;
                 }
+                let tier = if media::is_video_file(&path) {
+                    WorkTier::VideoThumbnail
+                } else {
+                    WorkTier::EmbeddedOnly
+                };
                 self.grid.set_tile_state(idx, TileState::LoadingEmbedded);
                 let is_heif = decode::is_heif_extension(&path);
-                self.spawn_io_read(
-                    idx,
-                    path,
-                    current_gen,
-                    WorkTier::EmbeddedOnly,
-                    is_heif,
-                    THUMB_SIZE,
-                );
+                self.spawn_io_read(idx, path, current_gen, tier, is_heif, THUMB_SIZE);
                 scheduled_indices.push(idx);
             }
             if !scheduled_indices.is_empty() {
                 self.grid.record_event(GridEventKind::WorkScheduled {
                     indices: scheduled_indices,
-                    tier: "embedded".into(),
+                    tier: "visible_thumb".into(),
                 });
             }
             return;
@@ -630,6 +657,9 @@ impl GridView {
                 }
                 let path = self.grid.tile_path(idx).to_path_buf();
                 if path.as_os_str().is_empty() {
+                    continue;
+                }
+                if media::is_video_file(&path) {
                     continue;
                 }
                 self.grid.set_tile_state(idx, TileState::CreatingThumbnail);
@@ -713,6 +743,9 @@ impl GridView {
             if path.as_os_str().is_empty() {
                 continue;
             }
+            if media::is_video_file(&path) {
+                continue;
+            }
             self.upgrading.insert(idx);
             let is_heif = decode::is_heif_extension(&path);
             self.spawn_io_read(
@@ -751,6 +784,10 @@ impl GridView {
             }
             let path = self.grid.tile_path(idx).to_path_buf();
             if path.as_os_str().is_empty() {
+                continue;
+            }
+            if media::is_video_file(&path) {
+                self.grid.set_tile_no_date(idx);
                 continue;
             }
             self.date_scanning.insert(idx);
@@ -794,7 +831,7 @@ impl GridView {
                 let idx = self.grid.display_to_tile(below);
                 if self.grid.tile_state(idx) == TileState::NotLoaded {
                     let path = self.grid.tile_path(idx).to_path_buf();
-                    if !path.as_os_str().is_empty() {
+                    if !path.as_os_str().is_empty() && !media::is_video_file(&path) {
                         self.grid.set_tile_state(idx, TileState::LoadingEmbedded);
                         let is_heif = decode::is_heif_extension(&path);
                         self.spawn_io_read(
@@ -820,7 +857,7 @@ impl GridView {
                 let idx = self.grid.display_to_tile(above);
                 if self.grid.tile_state(idx) == TileState::NotLoaded {
                     let path = self.grid.tile_path(idx).to_path_buf();
-                    if !path.as_os_str().is_empty() {
+                    if !path.as_os_str().is_empty() && !media::is_video_file(&path) {
                         self.grid.set_tile_state(idx, TileState::LoadingEmbedded);
                         let is_heif = decode::is_heif_extension(&path);
                         self.spawn_io_read(
@@ -874,6 +911,7 @@ impl GridView {
                     // Full decode / upscale always needs the entire file
                     std::fs::read(&path).ok()
                 }
+                WorkTier::VideoThumbnail => Some(Vec::new()),
                 WorkTier::DateScan => {
                     // JPEG-like files usually only need the EXIF header. TIFF/DNG
                     // may need offset-following reads from the decode worker.
@@ -1062,12 +1100,13 @@ impl GridView {
                     {
                         let state = self.grid.tile_state(idx);
                         let name = self.grid.tile_name(idx);
+                        let is_video = media::is_video_file(self.grid.tile_path(idx));
                         let texture = self.textures.get(idx).and_then(|t| t.as_ref());
                         let timing = self.timings.get(idx);
                         let response = Self::render_tile(
-                            ui, idx, name, state, texture, timing, tile_w, tile_h, debug,
+                            ui, idx, name, state, texture, timing, tile_w, tile_h, is_video, debug,
                         );
-                        if response.clicked() {
+                        if response.clicked() && !is_video {
                             clicked = Some(pos);
                         }
                     }
@@ -1220,6 +1259,7 @@ impl GridView {
         timing: Option<&TileTiming>,
         tile_w: f32,
         tile_h: f32,
+        is_video: bool,
         debug: bool,
     ) -> egui::Response {
         let desired_size = egui::vec2(tile_w, tile_h);
@@ -1256,8 +1296,37 @@ impl GridView {
                     TileState::EmbeddedMissed => egui::Color32::from_rgb(55, 45, 45),
                     TileState::CreatingThumbnail => egui::Color32::from_rgb(40, 55, 60),
                     TileState::Loaded => egui::Color32::from_rgb(35, 60, 35),
+                    TileState::Failed => egui::Color32::from_rgb(65, 35, 35),
                 };
                 painter.rect_filled(rect, 2.0, bg);
+            }
+
+            if is_video {
+                let badge_rect = egui::Rect::from_min_size(
+                    egui::pos2(rect.min.x + 6.0, rect.min.y + 6.0),
+                    egui::vec2(48.0, 20.0),
+                );
+                painter.rect_filled(
+                    badge_rect,
+                    3.0,
+                    egui::Color32::from_rgba_premultiplied(0, 0, 0, 170),
+                );
+                painter.text(
+                    badge_rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    "VIDEO",
+                    egui::FontId::monospace(9.0),
+                    egui::Color32::from_rgb(235, 235, 235),
+                );
+                if state == TileState::Failed && texture.is_none() {
+                    painter.text(
+                        rect.center(),
+                        egui::Align2::CENTER_CENTER,
+                        "No thumbnail",
+                        egui::FontId::proportional(12.0),
+                        egui::Color32::from_rgb(210, 160, 160),
+                    );
+                }
             }
 
             // Hover/click highlight — subtle alpha brightening

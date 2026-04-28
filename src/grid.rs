@@ -28,6 +28,8 @@ pub enum TileState {
     CreatingThumbnail,
     /// Thumbnail is ready for display.
     Loaded,
+    /// Thumbnail creation failed. Tile remains visible as an error placeholder.
+    Failed,
 }
 
 impl std::fmt::Display for TileState {
@@ -38,6 +40,7 @@ impl std::fmt::Display for TileState {
             TileState::EmbeddedMissed => write!(f, "no embed"),
             TileState::CreatingThumbnail => write!(f, "creating…"),
             TileState::Loaded => write!(f, "loaded"),
+            TileState::Failed => write!(f, "failed"),
         }
     }
 }
@@ -716,6 +719,15 @@ impl Grid {
             .map(|&idx| self.paths[idx].clone())
             .collect()
     }
+
+    /// Get all file paths in display order with their display positions.
+    pub fn all_paths_with_positions(&self) -> Vec<(usize, PathBuf)> {
+        self.display_order
+            .iter()
+            .enumerate()
+            .map(|(pos, &idx)| (pos, self.paths[idx].clone()))
+            .collect()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -839,6 +851,7 @@ mod tests {
         assert_eq!(TileState::EmbeddedMissed.to_string(), "no embed");
         assert_eq!(TileState::CreatingThumbnail.to_string(), "creating…");
         assert_eq!(TileState::Loaded.to_string(), "loaded");
+        assert_eq!(TileState::Failed.to_string(), "failed");
     }
 
     // -- Viewport + scroll tests -------------------------------------------

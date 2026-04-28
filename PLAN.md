@@ -198,10 +198,14 @@
 - Support `.webm` containers with VP8/VP9 streams where the selected decoder supports them
 - Extract a representative thumbnail frame near the beginning of the video, avoiding full-file decode
 - Apply orientation/rotation metadata before uploading the thumbnail texture
-- Show a video badge or duration overlay on video thumbnails
+- Show a classic play affordance on video thumbnails: a translucent circle with a right-facing triangle, not a text `VIDEO` tag
+- Launch the OS default video player when a standalone video tile is clicked
+- Detect iPhone Live Photos by matching same-stem image/video pairs that differ only by extension, such as `IMG_0001.HEIC` + `IMG_0001.MOV`
+- For Live Photos, show the still image as the primary grid tile with a `Live Image` tag instead of a separate video tile
+- Add a full image view affordance for Live Photos that launches or plays the paired movie
 - Fail gracefully for unsupported codecs, DRM-protected files, corrupt videos, or missing decoder support
 - Measure startup impact separately from image thumbnailing so video work does not regress image-folder performance
-- **Exit criterion:** Folders containing iPhone MOV, MP4, and WebM files show usable thumbnails in the grid while image thumbnail performance remains unchanged.
+- **Exit criterion:** Folders containing iPhone MOV, MP4, WebM, and Live Photo pairs show usable thumbnails and launch the appropriate movie while image thumbnail performance remains unchanged.
 
 ### Phase 10 — Polish & Robustness
 **Goal:** Handle real-world usage edge cases.

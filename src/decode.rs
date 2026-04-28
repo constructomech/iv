@@ -1,5 +1,6 @@
 use std::io::{BufReader, Cursor, Read};
 use std::path::Path;
+use std::process::Command;
 
 use crate::app::DecodedImage;
 
@@ -1156,6 +1157,56 @@ pub fn is_raw_extension(path: &Path) -> bool {
     }
 }
 
+/// Decode a video thumbnail by asking ffmpeg to seek near the start and emit
+/// one still frame. This keeps video codec support out of the main binary while
+/// still supporting common iPhone MOV files when ffmpeg is available on PATH.
+pub fn decode_video_thumbnail(path: &Path, max_size: u32) -> Result<DecodedImage, String> {
+    let scale = format!("scale={max_size}:{max_size}:force_original_aspect_ratio=decrease");
+    let output = Command::new("ffmpeg")
+        .args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-ss",
+            "00:00:00.100",
+            "-i",
+        ])
+        .arg(path)
+        .args([
+            "-frames:v",
+            "1",
+            "-vf",
+            &scale,
+            "-f",
+            "image2pipe",
+            "-vcodec",
+            "png",
+            "-",
+        ])
+        .output()
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                "ffmpeg not found on PATH".to_string()
+            } else {
+                format!("failed to run ffmpeg: {e}")
+            }
+        })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("ffmpeg failed: {}", stderr.trim()));
+    }
+
+    let img = image::load_from_memory(&output.stdout)
+        .map_err(|e| format!("failed to decode ffmpeg thumbnail: {e}"))?;
+    let rgba = img.to_rgba8();
+    Ok(DecodedImage {
+        width: rgba.width(),
+        height: rgba.height(),
+        pixels: rgba.into_raw(),
+    })
+}
+
 // ---------------------------------------------------------------------------
 // LibRaw full-resolution raw decode (via C wrapper)
 // ---------------------------------------------------------------------------
@@ -1589,6 +1640,12 @@ mod tests {
     #[test]
     fn thumbnail_nonexistent_returns_error() {
         let result = decode_thumbnail(Path::new("/no/such/file.jpg"), 160);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn video_thumbnail_nonexistent_returns_error() {
+        let result = decode_video_thumbnail(Path::new("/no/such/file.mov"), 160);
         assert!(result.is_err());
     }
 

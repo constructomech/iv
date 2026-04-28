@@ -2,7 +2,7 @@
 
 use rust_i18n::t;
 use std::env;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process;
 
 use eframe::egui;
@@ -17,6 +17,7 @@ mod folder_tree;
 mod grid;
 mod grid_view;
 mod image_view;
+mod media;
 
 fn main() {
     env_logger::init();
@@ -102,13 +103,14 @@ struct IvApp {
 impl IvApp {
     fn new_folder(path: PathBuf, log_enabled: bool) -> Self {
         let grid = Self::new_grid(log_enabled);
+        let folder_pane_open = !folder_has_direct_media(&path);
         Self {
             grid_view: grid_view::GridView::new(grid),
             folder_tree: folder_tree::FolderTree::new(path.clone()),
             enum_handle: Some(enumerator::enumerate_folder(path.clone())),
             enum_done: false,
             current_folder: path,
-            folder_pane_open: false,
+            folder_pane_open,
             log_enabled,
             mode: AppMode::Grid,
         }
@@ -201,10 +203,23 @@ impl IvApp {
         self.show_folder_bar(ui);
 
         if let Some(clicked_idx) = self.grid_view.show(ctx, ui) {
-            let paths = self.grid_view.grid().all_paths();
-            if !paths.is_empty() && clicked_idx < paths.len() {
+            let paths_with_positions: Vec<_> = self
+                .grid_view
+                .grid()
+                .all_paths_with_positions()
+                .into_iter()
+                .filter(|(_, path)| media::is_image_file(path))
+                .collect();
+            let image_index = paths_with_positions
+                .iter()
+                .position(|(pos, _)| *pos == clicked_idx);
+            if let Some(image_index) = image_index {
+                let paths = paths_with_positions
+                    .into_iter()
+                    .map(|(_, path)| path)
+                    .collect();
                 self.mode =
-                    AppMode::Image(Box::new(image_view::ImageView::new(paths, clicked_idx)));
+                    AppMode::Image(Box::new(image_view::ImageView::new(paths, image_index)));
             }
         }
     }
@@ -287,5 +302,58 @@ impl Drop for IvApp {
         if let Some(path) = self.grid_view.grid().dump_log(&log_path) {
             eprintln!("{}", t!("log.written", path = path.display().to_string()));
         }
+    }
+}
+
+fn folder_has_direct_media(path: &Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(path) else {
+        return false;
+    };
+
+    entries.filter_map(Result::ok).any(|entry| {
+        entry.file_type().is_ok_and(|file_type| file_type.is_file())
+            && media::is_media_file(&entry.path())
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    fn make_test_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("iv_main_test_{name}_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn direct_image_detection_ignores_empty_folders_and_subdirectories() {
+        let dir = make_test_dir("no_direct_images");
+        fs::create_dir_all(dir.join("nested")).unwrap();
+        fs::write(dir.join("nested").join("photo.jpg"), b"fake").unwrap();
+        fs::write(dir.join("notes.txt"), b"not an image").unwrap();
+
+        assert!(!folder_has_direct_media(&dir));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn direct_image_detection_finds_top_level_images() {
+        let dir = make_test_dir("direct_images");
+        fs::write(dir.join("photo.JPG"), b"fake").unwrap();
+
+        assert!(folder_has_direct_media(&dir));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn direct_media_detection_finds_top_level_videos() {
+        let dir = make_test_dir("direct_videos");
+        fs::write(dir.join("IMG_0001.MOV"), b"fake").unwrap();
+
+        assert!(folder_has_direct_media(&dir));
+        let _ = fs::remove_dir_all(&dir);
     }
 }
