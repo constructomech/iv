@@ -188,7 +188,22 @@
   - Async background writer, never blocks the UI
 - **Exit criterion:** Published benchmark numbers. Cache decision made with data.
 
-### Phase 9 — Polish & Robustness
+### Phase 9 — Video Thumbnail Support
+**Goal:** Show thumbnails for common video files without adding full video playback.
+
+- Expand enumeration to include video extensions (case-insensitive): `.mov`, `.mp4`, `.webm`
+- Treat videos as first-class grid entries with a distinct media type, but keep image and video decode paths separate
+- Start with iPhone `.MOV` files, including H.264/HEVC content and rotation metadata
+- Support `.mp4` containers with common H.264/HEVC streams
+- Support `.webm` containers with VP8/VP9 streams where the selected decoder supports them
+- Extract a representative thumbnail frame near the beginning of the video, avoiding full-file decode
+- Apply orientation/rotation metadata before uploading the thumbnail texture
+- Show a video badge or duration overlay on video thumbnails
+- Fail gracefully for unsupported codecs, DRM-protected files, corrupt videos, or missing decoder support
+- Measure startup impact separately from image thumbnailing so video work does not regress image-folder performance
+- **Exit criterion:** Folders containing iPhone MOV, MP4, and WebM files show usable thumbnails in the grid while image thumbnail performance remains unchanged.
+
+### Phase 10 — Polish & Robustness
 **Goal:** Handle real-world usage edge cases.
 
 - Adjustable thumbnail/tile size (keyboard shortcut or scroll-zoom in folder view)
@@ -211,14 +226,14 @@
 | Decision | Defer Until | Notes |
 |---|---|---|
 | Folder browsing / tree view | After Phase 5 | May integrate with Explorer shell extension instead |
-| Thumbnail cache | Phase 7 | Measure first, decide with data |
+| Thumbnail cache | Phase 8 | Measure first, decide with data |
 | Metadata display (EXIF date, dimensions, etc.) | After Phase 5 | Nice-to-have for image view |
 | Sorting (by name, date, size) | After Phase 6 | Requires reading metadata for all files |
 | Filtering | After Phase 6 | By date range, file type, etc. |
 | Multi-folder / recursive | After Phase 6 | Walk subdirectories |
-| Embed EXIF thumbnails | After Phase 7 | Opt-in CLI command (`iv --embed-thumbnails <folder>`) to losslessly inject EXIF thumbnails into source JPEGs that lack them. One-time cost, permanent speedup. Never automatic. |
+| Embed EXIF thumbnails | After Phase 8 | Opt-in CLI command (`iv --embed-thumbnails <folder>`) to losslessly inject EXIF thumbnails into source JPEGs that lack them. One-time cost, permanent speedup. Never automatic. |
 | RAW demosaicing | Far future | Embedded JPEG previews cover viewing. Only needed for "develop" features. |
-| Video thumbnail support | Far future | Different decode pipeline entirely |
+| Full video playback | Far future | Thumbnail support is Phase 9; playback requires a separate timing/audio/UI pipeline. |
 
 ---
 
@@ -270,9 +285,11 @@ Tests grow with each phase. No test fixtures are checked in — synthetic images
 | 3 — Scheduler | Unit: priority ordering, generation counter, cancel semantics. |
 | 4 — I/O Engine | Integration: concurrent read throughput, partial read correctness, semaphore bounding. |
 | 5 — Image View | Unit: zoom/pan math. Integration: pre-decode neighbors. |
-| 6 — Large Folders | Stress: 100k synthetic entries, measure frame time, memory. |
-| 7 — Measurement | Benchmarks (`cargo bench`): decode throughput, I/O throughput, EXIF extraction rate. |
-| 8 — Polish | Fuzz/edge-case: corrupt files, permission denied, zero-byte, very large dimensions. |
+| 6 — Benchmarks | Benchmarks (`cargo bench`): decode throughput, I/O throughput, EXIF extraction rate. |
+| 7 — Large Folders | Stress: 100k synthetic entries, measure frame time, memory. |
+| 8 — Measurement | Benchmark-folder sets, cold/warm start comparisons, thumbnail cache decision data. |
+| 9 — Video Thumbs | Integration: MOV/MP4/WebM thumbnail extraction, iPhone rotation metadata, unsupported codec fallback. |
+| 10 — Polish | Fuzz/edge-case: corrupt files, permission denied, zero-byte, very large dimensions. |
 
 ---
 
