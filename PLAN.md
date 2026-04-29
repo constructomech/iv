@@ -191,12 +191,13 @@
 ### Phase 9 — Video Thumbnail Support
 **Goal:** Show thumbnails for common video files without adding full video playback.
 
-- Expand enumeration to include video extensions (case-insensitive): `.mov`, `.mp4`, `.webm`, `.mkv`
+- Expand enumeration to include video extensions (case-insensitive): `.mov`, `.mp4`, `.webm`, `.mkv`, `.avi`, `.3gp`, `.mpg`, `.mpeg`, `.vob`, `.wmv`
 - Treat videos as first-class grid entries with a distinct media type, but keep image and video decode paths separate
 - Start with iPhone `.MOV` files, including H.264/HEVC content and rotation metadata
 - Support `.mp4` containers with common H.264/HEVC streams
 - Support `.webm` containers with VP8/VP9 streams where the selected decoder supports them
 - Support `.mkv` containers where the selected decoder supports the contained codec
+- Support observed legacy formats through the same decoder path: `.avi`, `.3gp`, `.mpg`, `.mpeg`, `.vob`, `.wmv`
 - Extract a representative thumbnail frame near the beginning of the video, avoiding full-file decode
 - Apply orientation/rotation metadata before uploading the thumbnail texture
 - Show a classic play affordance on video thumbnails: a translucent circle with a right-facing triangle, not a text `VIDEO` tag

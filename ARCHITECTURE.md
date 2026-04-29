@@ -278,7 +278,7 @@ and decode the first thumbnail via `LibHeif::decode()` in RGBA colorspace.
 HEIC files store thumbnails as separate image items in the container (not
 in EXIF tags), so the EXIF approach doesn't work for them.
 
-**Video files**: `.mov`, `.mp4`, `.webm`, and `.mkv` entries are enumerated into the
+**Video files**: `.mov`, `.mp4`, `.webm`, `.mkv`, `.avi`, `.3gp`, `.mpg`, `.mpeg`, `.vob`, and `.wmv` entries are enumerated into the
 same grid but use a separate `VideoThumbnail` work tier. The worker invokes
 `ffmpeg` from `PATH`, seeks near the start, decodes a single frame to PNG on
 stdout, then converts that frame to the existing RGBA `DecodedImage` texture

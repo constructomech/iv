@@ -25,7 +25,9 @@ pub const IMAGE_EXTENSIONS: &[&str] = &[
 ];
 
 /// Recognized video file extensions (lowercase, without dot).
-pub const VIDEO_EXTENSIONS: &[&str] = &["mov", "mp4", "webm", "mkv"];
+pub const VIDEO_EXTENSIONS: &[&str] = &[
+    "mov", "mp4", "webm", "mkv", "avi", "3gp", "mpg", "mpeg", "vob", "wmv",
+];
 
 pub fn media_kind_for_path(path: &Path) -> Option<MediaKind> {
     let ext = path.extension()?.to_str()?.to_ascii_lowercase();
@@ -94,6 +96,12 @@ mod tests {
         assert!(is_video_file(Path::new("clip.Mp4")));
         assert!(is_video_file(Path::new("clip.WEBM")));
         assert!(is_video_file(Path::new("clip.mkv")));
+        assert!(is_video_file(Path::new("clip.AVI")));
+        assert!(is_video_file(Path::new("clip.3gp")));
+        assert!(is_video_file(Path::new("clip.mpg")));
+        assert!(is_video_file(Path::new("clip.mpeg")));
+        assert!(is_video_file(Path::new("clip.vob")));
+        assert!(is_video_file(Path::new("clip.wmv")));
     }
 
     #[test]
