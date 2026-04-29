@@ -211,6 +211,7 @@ mod tests {
         fs::write(dir.join("clip.MOV"), b"fake mov").unwrap();
         fs::write(dir.join("clip.mp4"), b"fake mp4").unwrap();
         fs::write(dir.join("render.webm"), b"fake webm").unwrap();
+        fs::write(dir.join("episode.mkv"), b"fake mkv").unwrap();
         fs::write(dir.join("notes.txt"), b"not media").unwrap();
 
         let handle = enumerate_folder(dir.clone());
@@ -224,7 +225,7 @@ mod tests {
             }
         }
 
-        assert_eq!(found.len(), 3);
+        assert_eq!(found.len(), 4);
         cleanup(&dir);
     }
 
