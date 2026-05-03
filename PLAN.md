@@ -46,6 +46,7 @@
 | Windowing + UI | `egui` + `eframe` (wgpu backend) | GPU-rendered, handles scrolling/layout, fast iteration. We manage textures ourselves for progressive rendering. |
 | Image decode (JPEG) | `zune-jpeg` (pure Rust) | ~2-3x faster than `image` crate for JPEG. Pure Rust = zero C deps, cross-platform. Within 10-20% of libjpeg-turbo. |
 | Image decode (other) | `image` crate | PNG, WebP, TIFF, BMP, etc. |
+| HEIC/HEIF decode | Dynamically loaded libheif DLLs | Keeps LGPL libheif and codec libraries replaceable runtime components instead of static app links. |
 | RAW preview extraction | `kamadak-exif` + raw TIFF/IFD parsing | DNG and CR2 embed full-res JPEG previews. Extract those — don't demosaic sensor data. |
 | EXIF thumbnail | `kamadak-exif` | Extract embedded JPEG thumbnails without decoding the full image. Works on RAW files too (DNG, CR2, NEF, ARW all use EXIF/TIFF structure). |
 | Video thumbnails | Dynamically loaded FFmpeg DLLs | Broad real-world codec/container coverage without shelling to `ffmpeg.exe`; LGPL libraries remain replaceable runtime components. |
@@ -219,7 +220,7 @@
 - Permission denied: skip gracefully
 - Non-image files: ignore without errors
 - RAW sensor demosaicing via `rawloader` (stretch goal — embedded JPEG previews cover 99% of use cases)
-- HEIC/AVIF support via pure-Rust decoders when available (stretch goal)  
+- Pure-Rust HEIC/AVIF support when real-world codec coverage is available (stretch goal)  
 - Window resize: reflow grid
 - DPI awareness / HiDPI displays
 - Dark theme (default)
@@ -321,8 +322,8 @@ Tests grow with each phase. No test fixtures are checked in — synthetic images
 # Build (release for perf testing)
 cargo build --release
 
-# Windows video thumbnail support uses FFmpeg DLLs loaded at runtime.
-# Ship the vcpkg FFmpeg runtime DLLs beside iv.exe, or put them on PATH.
+# Windows HEIC and video support use libheif and FFmpeg DLLs loaded at runtime.
+# Ship the vcpkg libheif/FFmpeg runtime DLLs beside iv.exe, or put them on PATH.
 # Local dev builds also look in target/vcpkg/installed/x64-windows/bin.
 
 # Run on a folder

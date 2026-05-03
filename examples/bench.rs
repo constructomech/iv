@@ -9,9 +9,6 @@
 ///
 /// Generated files are cached next to the source. Delete to regenerate.
 use image::{ImageFormat, RgbImage, RgbaImage};
-use libheif_rs::{
-    Channel, ColorSpace, CompressionFormat, EncoderQuality, HeifContext, Image, LibHeif, RgbChroma,
-};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -80,8 +77,6 @@ fn print_usage_and_exit() -> ! {
 }
 
 fn main() {
-    libheif_rs::integration::image::register_all_decoding_hooks();
-
     let args: Vec<String> = std::env::args().skip(1).collect();
     let raw_files = parse_raw_args(&args);
     let source = raw_files[0].clone();
@@ -131,14 +126,7 @@ fn main() {
             files.push((r.clone(), "RAW"));
         }
     }
-    for name in [
-        "jpeg.jpg",
-        "tiff.tiff",
-        "png.png",
-        "webp.webp",
-        "heic.heic",
-        "gif.gif",
-    ] {
+    for name in ["jpeg.jpg", "tiff.tiff", "png.png", "webp.webp", "gif.gif"] {
         let p = bench_dir.join(name);
         if p.exists() {
             files.push((p, "GEN"));
@@ -202,9 +190,6 @@ fn generate_formats(dir: &Path, rgb: &RgbImage, rgba: &RgbaImage) {
     encode_step("  WebP", || {
         rgba.save_with_format(dir.join("webp.webp"), ImageFormat::WebP)
             .unwrap();
-    });
-    encode_step("  HEIC (AV1 q50+thumb)", || {
-        encode_heic(dir, rgb, "heic.heic");
     });
     encode_step("  GIF (256-color)", || {
         rgba.save_with_format(dir.join("gif.gif"), ImageFormat::Gif)
@@ -270,40 +255,6 @@ fn build_app1(thumb: &[u8]) -> Vec<u8> {
     a.extend_from_slice(b"Exif\0\0");
     a.extend_from_slice(&t);
     a
-}
-
-fn encode_heic(dir: &Path, src: &RgbImage, name: &str) {
-    let lh = LibHeif::new();
-    let img = rgb_to_heif(src);
-    let mut ctx = HeifContext::new().unwrap();
-    let mut enc = lh.encoder_for_format(CompressionFormat::Av1).unwrap();
-    enc.set_quality(EncoderQuality::Lossy(50)).unwrap();
-    let h = ctx.encode_image(&img, &mut enc, None).unwrap();
-    let mut te = lh.encoder_for_format(CompressionFormat::Av1).unwrap();
-    te.set_quality(EncoderQuality::Lossy(40)).unwrap();
-    let _ = ctx.encode_thumbnail(&img, &h, 320, &mut te, None).unwrap();
-    ctx.write_to_file(dir.join(name).to_str().unwrap()).unwrap();
-}
-
-fn rgb_to_heif(src: &RgbImage) -> Image {
-    let (w, h) = (src.width(), src.height());
-    let mut img = Image::new(w, h, ColorSpace::Rgb(RgbChroma::C444)).unwrap();
-    img.create_plane(Channel::R, w, h, 8).unwrap();
-    img.create_plane(Channel::G, w, h, 8).unwrap();
-    img.create_plane(Channel::B, w, h, 8).unwrap();
-    let p = img.planes_mut();
-    let s = p.r.as_ref().unwrap().stride;
-    let (dr, dg, db) = (p.r.unwrap().data, p.g.unwrap().data, p.b.unwrap().data);
-    for y in 0..h {
-        for x in 0..w {
-            let px = src.get_pixel(x, y);
-            let i = s * y as usize + x as usize;
-            dr[i] = px[0];
-            dg[i] = px[1];
-            db[i] = px[2];
-        }
-    }
-    img
 }
 
 fn rgba_to_rgb(rgba: &[u8]) -> Vec<u8> {

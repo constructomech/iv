@@ -23,9 +23,6 @@ mod media;
 fn main() {
     env_logger::init();
 
-    // Register HEIF/HEIC decoder so the `image` crate can decode these formats.
-    libheif_rs::integration::image::register_all_decoding_hooks();
-
     let args: Vec<String> = env::args().collect();
     let log_enabled = args.iter().any(|a| a == "--log");
 

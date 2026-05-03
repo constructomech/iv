@@ -1,8 +1,9 @@
 fn main() {
     println!("cargo:rerun-if-changed=src/libraw_wrapper.c");
     println!("cargo:rerun-if-changed=src/ffmpeg_wrapper.c");
+    println!("cargo:rerun-if-changed=src/heif_wrapper.c");
 
-    // Locate vcpkg installation (same directory used by libheif-sys).
+    // Locate vcpkg installations.
     let vcpkg_root = std::path::Path::new("target/vcpkg/installed/x64-windows-static-md");
     let ffmpeg_root = std::path::Path::new("target/vcpkg/installed/x64-windows");
 
@@ -30,4 +31,11 @@ fn main() {
     ffmpeg_cc.file("src/ffmpeg_wrapper.c");
     ffmpeg_cc.include(ffmpeg_root.join("include"));
     ffmpeg_cc.compile("iv_ffmpeg");
+
+    // Compile the HEIF wrapper against dynamic vcpkg headers. Like FFmpeg,
+    // libheif is runtime-loaded to keep LGPL components replaceable.
+    let mut heif_cc = cc::Build::new();
+    heif_cc.file("src/heif_wrapper.c");
+    heif_cc.include(ffmpeg_root.join("include"));
+    heif_cc.compile("iv_heif");
 }

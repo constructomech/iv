@@ -272,11 +272,14 @@ so it handles truncated data robustly — unlike the full EXIF library which
 fails when tag values reference offsets beyond the buffer. The JPEG
 thumbnail is then decoded directly with `zune-jpeg`.
 
-**HEIC / HEIF files**: Uses `libheif-rs` to open the file as an ISOBMFF
-container, get the primary image handle, check `number_of_thumbnails()`,
-and decode the first thumbnail via `LibHeif::decode()` in RGBA colorspace.
-HEIC files store thumbnails as separate image items in the container (not
-in EXIF tags), so the EXIF approach doesn't work for them.
+**HEIC / HEIF files**: Uses a small C wrapper that dynamically loads
+`heif.dll` at decode time, opens the ISOBMFF container, gets the primary image
+handle, checks `heif_image_handle_get_number_of_thumbnails()`, and decodes the
+first thumbnail to RGBA. HEIC files store thumbnails as separate image items in
+the container (not in EXIF tags), so the EXIF approach doesn't work for them.
+The main executable does not link to libheif import libraries or require
+`heif.dll` at startup; distributed builds must ship the LGPL libheif runtime
+DLLs beside the executable or make them available on `PATH`.
 
 **Video files**: `.mov`, `.mp4`, `.webm`, `.mkv`, `.avi`, `.3gp`, `.mpg`, `.mpeg`, `.vob`, and `.wmv` entries are enumerated into the
 same grid but use a separate `VideoThumbnail` work tier. `decode_video_thumbnail()`
@@ -298,10 +301,10 @@ The bottleneck is I/O latency, not decode time.
 
 ### Full Decode (Phase 2)
 
-`decode_from_bytes()` reads the entire file, decodes it via the `image`
-crate (which dispatches to format-specific decoders including `libheif-rs`
-for HEIC), applies EXIF orientation, and downscales to 160×160 using
-`image::imageops::thumbnail()`.
+`decode_from_bytes()` reads the entire file. HEIC/HEIF routes through the
+dynamic libheif wrapper, which applies HEIF transforms internally. Other image
+formats decode via the `image` crate, apply EXIF orientation, and downscale to
+160×160 using `image::imageops::thumbnail()`.
 
 **Typical timing**: 100–600ms depending on format and I/O. HEIC full
 decode is the slowest due to HEVC/AV1 decompression.

@@ -33,8 +33,5 @@ pub use media::{
     media_kind_for_path,
 };
 
-/// Register HEIF/HEIC decoder hooks so the `image` crate can decode these formats.
-/// Call once at startup before decoding any HEIC files.
-pub fn register_heif_hooks() {
-    libheif_rs::integration::image::register_all_decoding_hooks();
-}
+/// Kept for diagnostic examples; HEIC decoding now uses iv's dynamic libheif wrapper.
+pub fn register_heif_hooks() {}

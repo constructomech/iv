@@ -1323,13 +1323,15 @@ pub fn decode_full_thumbnail(
 
     let data =
         std::fs::read(path).map_err(|e| format!("Failed to read {}: {e}", path.display()))?;
+    if is_heif_extension(path) {
+        let (img, _) = decode_from_bytes(&data, max_size, true)?;
+        timings.full_ms = start.elapsed().as_secs_f64() * 1000.0;
+        return Ok((img, timings));
+    }
+
     let img = image::load_from_memory(&data).map_err(|e| format!("Failed to decode: {e}"))?;
-    let img = if !is_heif_extension(path) {
-        let orientation = read_exif_orientation(&data);
-        apply_orientation(img, orientation)
-    } else {
-        img
-    };
+    let orientation = read_exif_orientation(&data);
+    let img = apply_orientation(img, orientation);
     let thumb = img.thumbnail(max_size, max_size);
     let rgba = thumb.to_rgba8();
 
@@ -1346,9 +1348,8 @@ pub fn decode_full_thumbnail(
 }
 
 /// Decode a thumbnail from already-loaded file bytes (I/O already done).
-/// Applies EXIF orientation for non-HEIF formats. For HEIF, libheif
-/// applies orientation internally during decode.
-/// `skip_orientation`: set true for HEIC/HEIF files.
+/// Applies EXIF orientation unless `skip_orientation` is set. For HEIF/HEIC,
+/// `skip_orientation` routes through dynamic libheif, which applies transforms.
 pub fn decode_from_bytes(
     data: &[u8],
     max_size: u32,
@@ -1357,13 +1358,27 @@ pub fn decode_from_bytes(
     let mut timings = DecodeTimings::default();
     let start = std::time::Instant::now();
 
+    if skip_orientation {
+        let mut img =
+            decode_heif_from_bytes(data).ok_or_else(|| "Failed to decode HEIC/HEIF".to_string())?;
+        if img.width > max_size || img.height > max_size {
+            let dyn_img = image::RgbaImage::from_raw(img.width, img.height, img.pixels)
+                .ok_or_else(|| "Failed to construct HEIC thumbnail pixels".to_string())?;
+            let thumb = image::DynamicImage::ImageRgba8(dyn_img).thumbnail(max_size, max_size);
+            let rgba = thumb.to_rgba8();
+            img = DecodedImage {
+                width: rgba.width(),
+                height: rgba.height(),
+                pixels: rgba.into_raw(),
+            };
+        }
+        timings.full_ms = start.elapsed().as_secs_f64() * 1000.0;
+        return Ok((img, timings));
+    }
+
     let img = image::load_from_memory(data).map_err(|e| format!("Failed to decode: {e}"))?;
-    let img = if !skip_orientation {
-        let orientation = read_exif_orientation(data);
-        apply_orientation(img, orientation)
-    } else {
-        img
-    };
+    let orientation = read_exif_orientation(data);
+    let img = apply_orientation(img, orientation);
     let thumb = img.thumbnail(max_size, max_size);
     let rgba = thumb.to_rgba8();
 
@@ -1387,101 +1402,144 @@ pub fn is_heif_extension(path: &Path) -> bool {
     }
 }
 
+fn heif_error_message(error: &[c_char]) -> String {
+    unsafe { CStr::from_ptr(error.as_ptr()) }
+        .to_string_lossy()
+        .trim()
+        .to_string()
+}
+
+fn decoded_heif_from_parts(out_data: *mut u8, width: c_int, height: c_int) -> Option<DecodedImage> {
+    if out_data.is_null() || width <= 0 || height <= 0 {
+        if !out_data.is_null() {
+            unsafe { iv_heif_free(out_data) };
+        }
+        return None;
+    }
+
+    let len = width as usize * height as usize * 4;
+    let pixels = unsafe { std::slice::from_raw_parts(out_data, len) }.to_vec();
+    unsafe { iv_heif_free(out_data) };
+    Some(DecodedImage {
+        width: width as u32,
+        height: height as u32,
+        pixels,
+    })
+}
+
 /// Try to extract the HEIF/HEIC container-level thumbnail via libheif.
 /// HEIC stores thumbnails as separate image items (not in EXIF), so the
 /// standard EXIF `JPEGInterchangeFormat` approach doesn't work.
 pub fn try_heif_thumbnail(path: &Path) -> Option<DecodedImage> {
-    use libheif_rs::{ColorSpace, LibHeif, RgbChroma};
-
     let path_str = path.to_str()?;
-    let ctx = libheif_rs::HeifContext::read_from_file(path_str).ok()?;
-    let handle = ctx.primary_image_handle().ok()?;
-
-    if handle.number_of_thumbnails() == 0 {
+    let path = CString::new(path_str).ok()?;
+    let mut out_data: *mut u8 = std::ptr::null_mut();
+    let mut width: c_int = 0;
+    let mut height: c_int = 0;
+    let mut error = [0 as c_char; 512];
+    let ret = unsafe {
+        iv_heif_decode_file(
+            path.as_ptr(),
+            1,
+            &mut out_data,
+            &mut width,
+            &mut height,
+            error.as_mut_ptr(),
+            error.len() as c_int,
+        )
+    };
+    if ret != 0 {
+        let message = heif_error_message(&error);
+        if !message.is_empty() && !message.contains("no thumbnail") {
+            log::debug!("HEIC thumbnail decode failed for {}: {message}", path_str);
+        }
+        if !out_data.is_null() {
+            unsafe { iv_heif_free(out_data) };
+        }
         return None;
     }
-
-    let mut thumb_ids = vec![0u32; 1];
-    handle.thumbnail_ids(&mut thumb_ids);
-    let thumb_handle = handle.thumbnail(thumb_ids[0]).ok()?;
-
-    let lib_heif = LibHeif::new();
-    let image = lib_heif
-        .decode(&thumb_handle, ColorSpace::Rgb(RgbChroma::Rgba), None)
-        .ok()?;
-
-    let planes = image.planes();
-    let plane = planes.interleaved?;
-    let width = image.width();
-    let height = image.height();
-    let stride = plane.stride;
-    let data = plane.data;
-
-    // Handle stride != width*4 (row padding)
-    let row_bytes = width as usize * 4;
-    let pixels = if stride == row_bytes {
-        data[..row_bytes * height as usize].to_vec()
-    } else {
-        let mut pixels = Vec::with_capacity(row_bytes * height as usize);
-        for y in 0..height as usize {
-            let row_start = y * stride;
-            pixels.extend_from_slice(&data[row_start..row_start + row_bytes]);
-        }
-        pixels
-    };
-
-    Some(DecodedImage {
-        width,
-        height,
-        pixels,
-    })
+    decoded_heif_from_parts(out_data, width, height)
 }
 
 /// Try to extract the HEIF/HEIC container-level thumbnail from in-memory bytes.
 /// Same as `try_heif_thumbnail` but avoids a separate file read.
 pub fn try_heif_thumbnail_from_bytes(data: &[u8]) -> Option<DecodedImage> {
-    use libheif_rs::{ColorSpace, LibHeif, RgbChroma};
-
-    let ctx = libheif_rs::HeifContext::read_from_bytes(data).ok()?;
-    let handle = ctx.primary_image_handle().ok()?;
-
-    if handle.number_of_thumbnails() == 0 {
+    let mut out_data: *mut u8 = std::ptr::null_mut();
+    let mut width: c_int = 0;
+    let mut height: c_int = 0;
+    let mut error = [0 as c_char; 512];
+    let ret = unsafe {
+        iv_heif_decode_memory(
+            data.as_ptr().cast(),
+            data.len(),
+            1,
+            &mut out_data,
+            &mut width,
+            &mut height,
+            error.as_mut_ptr(),
+            error.len() as c_int,
+        )
+    };
+    if ret != 0 {
+        if !out_data.is_null() {
+            unsafe { iv_heif_free(out_data) };
+        }
         return None;
     }
+    decoded_heif_from_parts(out_data, width, height)
+}
 
-    let mut thumb_ids = vec![0u32; 1];
-    handle.thumbnail_ids(&mut thumb_ids);
-    let thumb_handle = handle.thumbnail(thumb_ids[0]).ok()?;
-
-    let lib_heif = LibHeif::new();
-    let image = lib_heif
-        .decode(&thumb_handle, ColorSpace::Rgb(RgbChroma::Rgba), None)
-        .ok()?;
-
-    let planes = image.planes();
-    let plane = planes.interleaved?;
-    let width = image.width();
-    let height = image.height();
-    let stride = plane.stride;
-    let data = plane.data;
-
-    let row_bytes = width as usize * 4;
-    let pixels = if stride == row_bytes {
-        data[..row_bytes * height as usize].to_vec()
-    } else {
-        let mut pixels = Vec::with_capacity(row_bytes * height as usize);
-        for y in 0..height as usize {
-            let row_start = y * stride;
-            pixels.extend_from_slice(&data[row_start..row_start + row_bytes]);
-        }
-        pixels
+/// Decode a full HEIF/HEIC image from in-memory bytes through dynamic libheif.
+pub fn decode_heif_from_bytes(data: &[u8]) -> Option<DecodedImage> {
+    let mut out_data: *mut u8 = std::ptr::null_mut();
+    let mut width: c_int = 0;
+    let mut height: c_int = 0;
+    let mut error = [0 as c_char; 512];
+    let ret = unsafe {
+        iv_heif_decode_memory(
+            data.as_ptr().cast(),
+            data.len(),
+            0,
+            &mut out_data,
+            &mut width,
+            &mut height,
+            error.as_mut_ptr(),
+            error.len() as c_int,
+        )
     };
+    if ret != 0 {
+        if !out_data.is_null() {
+            unsafe { iv_heif_free(out_data) };
+        }
+        return None;
+    }
+    decoded_heif_from_parts(out_data, width, height)
+}
 
-    Some(DecodedImage {
-        width,
-        height,
-        pixels,
-    })
+#[link(name = "iv_heif", kind = "static")]
+unsafe extern "C" {
+    fn iv_heif_decode_file(
+        path: *const c_char,
+        thumbnail_only: c_int,
+        out_data: *mut *mut u8,
+        out_width: *mut c_int,
+        out_height: *mut c_int,
+        err: *mut c_char,
+        err_len: c_int,
+    ) -> c_int;
+
+    fn iv_heif_decode_memory(
+        data: *const std::ffi::c_void,
+        len: usize,
+        thumbnail_only: c_int,
+        out_data: *mut *mut u8,
+        out_width: *mut c_int,
+        out_height: *mut c_int,
+        err: *mut c_char,
+        err_len: c_int,
+    ) -> c_int;
+
+    fn iv_heif_free(ptr: *mut u8);
 }
 
 /// Try to extract the EXIF embedded thumbnail from file bytes.

@@ -16,7 +16,7 @@ pub struct DecodedImage {
 }
 
 /// Load an image file from disk and decode it to RGBA, applying EXIF orientation.
-/// For HEIC/HEIF, libheif applies orientation internally, so we skip it.
+/// For HEIC/HEIF, dynamic libheif applies orientation internally.
 /// For raw files (DNG, CR2, NEF, etc.), uses LibRaw for full-resolution demosaicing,
 /// falling back to the embedded JPEG preview.
 pub fn load_image(path: &Path) -> Result<DecodedImage, String> {
@@ -91,16 +91,15 @@ fn apply_develop_settings(
 
 /// Standard image decode path (non-raw or raw fallback).
 fn load_image_standard(data: &[u8], path: &Path) -> Result<DecodedImage, String> {
+    if crate::decode::is_heif_extension(path) {
+        return crate::decode::decode_heif_from_bytes(data)
+            .ok_or_else(|| format!("Failed to decode {} as HEIC/HEIF", path.display()));
+    }
+
     let img = image::load_from_memory(data)
         .map_err(|e| format!("Failed to decode {}: {e}", path.display()))?;
-    // libheif applies orientation during decode for HEIC/HEIF,
-    // so only apply manual orientation for other formats.
-    let img = if !crate::decode::is_heif_extension(path) {
-        let orientation = crate::decode::read_exif_orientation(data);
-        crate::decode::apply_orientation(img, orientation)
-    } else {
-        img
-    };
+    let orientation = crate::decode::read_exif_orientation(data);
+    let img = crate::decode::apply_orientation(img, orientation);
     let rgba = img.to_rgba8();
     Ok(DecodedImage {
         width: rgba.width(),
