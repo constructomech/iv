@@ -438,11 +438,7 @@ impl ImageView {
                 .default_width(INFO_PANE_WIDTH)
                 .width_range(200.0..=360.0)
                 .show_inside(ui, |ui| {
-                    egui::ScrollArea::vertical()
-                        .auto_shrink([false, false])
-                        .show(ui, |ui| {
-                            self.render_info_pane(ui);
-                        });
+                    self.render_info_pane(ui);
                 });
         }
 
@@ -460,15 +456,12 @@ impl ImageView {
             total = self.paths.len()
         );
         ui.horizontal(|ui| {
-            let (chevron, tooltip) = if self.info_pane_open {
-                ("‹", "Hide info pane")
-            } else {
-                ("›", "Show info pane")
-            };
-            let toggle_response = ui
-                .add_sized([22.0, 20.0], egui::Button::new(chevron))
-                .on_hover_text(tooltip);
-            if toggle_response.clicked() {
+            if !self.info_pane_open
+                && ui
+                    .add_sized([22.0, 20.0], egui::Button::new("›"))
+                    .on_hover_text("Show info pane")
+                    .clicked()
+            {
                 self.toggle_info_pane();
             }
             ui.label(
@@ -614,97 +607,112 @@ impl ImageView {
     }
 
     fn render_info_pane(&mut self, ui: &mut egui::Ui) {
-        ui.vertical(|ui| {
+        ui.horizontal(|ui| {
             ui.label(
                 egui::RichText::new("Info")
                     .color(egui::Color32::from_rgb(210, 210, 210))
                     .size(14.0)
                     .strong(),
             );
-            ui.separator();
-
-            let Some((name, path_text)) = self.paths.get(self.current).map(|path| {
-                (
-                    path.file_name()
-                        .unwrap_or_default()
-                        .to_string_lossy()
-                        .to_string(),
-                    path.display().to_string(),
-                )
-            }) else {
-                Self::info_row(ui, "File", "—");
-                return;
-            };
-
-            Self::info_row(ui, "File", &name);
-            if let Some(modified) = self
-                .image_info
-                .as_ref()
-                .and_then(|info| info.modified.as_deref())
-            {
-                Self::info_row(ui, "File date", modified);
-            } else {
-                Self::info_row(ui, "File date", "Loading...");
-            }
-
-            ui.add_space(8.0);
-            ui.label(
-                egui::RichText::new("EXIF")
-                    .color(egui::Color32::from_rgb(170, 170, 170))
-                    .size(11.0)
-                    .strong(),
-            );
-
-            if let Some(info) = &self.image_info {
-                Self::info_row_opt(ui, "Date taken", info.exif.date_taken.as_deref());
-                Self::info_row_opt(ui, "Camera", info.exif.camera.as_deref());
-                Self::info_row_opt(ui, "Lens", info.exif.lens.as_deref());
-                Self::info_row_opt(ui, "Focal length", info.exif.focal_length.as_deref());
-                Self::info_row_opt(ui, "Aperture", info.exif.aperture.as_deref());
-                Self::info_row_opt(ui, "Shutter", info.exif.shutter_speed.as_deref());
-                Self::info_row_opt(ui, "ISO", info.exif.iso.as_deref());
-            } else {
-                Self::info_row(ui, "Date taken", "Loading...");
-                Self::info_row(ui, "Camera", "Loading...");
-                Self::info_row(ui, "Focal length", "Loading...");
-            }
-
-            ui.add_space(8.0);
-            ui.label(
-                egui::RichText::new("Develop")
-                    .color(egui::Color32::from_rgb(170, 170, 170))
-                    .size(11.0)
-                    .strong(),
-            );
-            if Self::lossless_edits_toggle(ui, &mut self.apply_lossless_edits).changed() {
-                self.reload_current_image(false);
-            }
-
-            if let Some(info) = &self.image_info {
-                if !info.develop.has_visible_settings() {
-                    Self::info_row(ui, "Settings", "—");
-                } else {
-                    let source = info
-                        .develop
-                        .source
-                        .map(|source| source.label())
-                        .unwrap_or("XMP");
-                    Self::info_row(ui, "Source", source);
-                    for setting in info.develop.visible_settings() {
-                        Self::develop_row(ui, setting, self.apply_lossless_edits);
-                    }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .add_sized([22.0, 20.0], egui::Button::new("‹"))
+                    .on_hover_text("Hide info pane")
+                    .clicked()
+                {
+                    self.toggle_info_pane();
                 }
-            } else {
-                Self::info_row(ui, "Settings", "Loading...");
-            }
-
-            ui.add_space(8.0);
-            ui.label(
-                egui::RichText::new(path_text)
-                    .color(egui::Color32::from_rgb(100, 100, 100))
-                    .size(10.0),
-            );
+            });
         });
+        ui.separator();
+
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.vertical(|ui| {
+                    let Some((name, path_text)) = self.paths.get(self.current).map(|path| {
+                        (
+                            path.file_name()
+                                .unwrap_or_default()
+                                .to_string_lossy()
+                                .to_string(),
+                            path.display().to_string(),
+                        )
+                    }) else {
+                        Self::info_row(ui, "File", "—");
+                        return;
+                    };
+
+                    Self::info_row(ui, "File", &name);
+                    if let Some(modified) = self
+                        .image_info
+                        .as_ref()
+                        .and_then(|info| info.modified.as_deref())
+                    {
+                        Self::info_row(ui, "File date", modified);
+                    } else {
+                        Self::info_row(ui, "File date", "Loading...");
+                    }
+
+                    ui.add_space(8.0);
+                    ui.label(
+                        egui::RichText::new("EXIF")
+                            .color(egui::Color32::from_rgb(170, 170, 170))
+                            .size(11.0)
+                            .strong(),
+                    );
+
+                    if let Some(info) = &self.image_info {
+                        Self::info_row_opt(ui, "Date taken", info.exif.date_taken.as_deref());
+                        Self::info_row_opt(ui, "Camera", info.exif.camera.as_deref());
+                        Self::info_row_opt(ui, "Lens", info.exif.lens.as_deref());
+                        Self::info_row_opt(ui, "Focal length", info.exif.focal_length.as_deref());
+                        Self::info_row_opt(ui, "Aperture", info.exif.aperture.as_deref());
+                        Self::info_row_opt(ui, "Shutter", info.exif.shutter_speed.as_deref());
+                        Self::info_row_opt(ui, "ISO", info.exif.iso.as_deref());
+                    } else {
+                        Self::info_row(ui, "Date taken", "Loading...");
+                        Self::info_row(ui, "Camera", "Loading...");
+                        Self::info_row(ui, "Focal length", "Loading...");
+                    }
+
+                    ui.add_space(8.0);
+                    ui.label(
+                        egui::RichText::new("Develop")
+                            .color(egui::Color32::from_rgb(170, 170, 170))
+                            .size(11.0)
+                            .strong(),
+                    );
+                    if Self::lossless_edits_toggle(ui, &mut self.apply_lossless_edits).changed() {
+                        self.reload_current_image(false);
+                    }
+
+                    if let Some(info) = &self.image_info {
+                        if !info.develop.has_visible_settings() {
+                            Self::info_row(ui, "Settings", "—");
+                        } else {
+                            let source = info
+                                .develop
+                                .source
+                                .map(|source| source.label())
+                                .unwrap_or("XMP");
+                            Self::info_row(ui, "Source", source);
+                            for setting in info.develop.visible_settings() {
+                                Self::develop_row(ui, setting, self.apply_lossless_edits);
+                            }
+                        }
+                    } else {
+                        Self::info_row(ui, "Settings", "Loading...");
+                    }
+
+                    ui.add_space(8.0);
+                    ui.label(
+                        egui::RichText::new(path_text)
+                            .color(egui::Color32::from_rgb(100, 100, 100))
+                            .size(10.0),
+                    );
+                });
+            });
     }
 
     fn develop_row(ui: &mut egui::Ui, setting: &XmpDevelopSetting, edits_active: bool) {
