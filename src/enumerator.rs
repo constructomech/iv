@@ -46,7 +46,6 @@ fn enumerate_inner(folder: &Path, tx: &mpsc::Sender<EnumMessage>) {
             return;
         }
     };
-
     let mut images_by_key = HashMap::new();
     let mut pending_videos_by_key: HashMap<String, Vec<PathBuf>> = HashMap::new();
     let mut count = 0usize;
@@ -346,8 +345,8 @@ mod tests {
     }
 
     #[test]
-    fn results_sorted_alphabetically() {
-        let dir = make_test_dir("sorted");
+    fn results_include_all_supported_media_without_requiring_order() {
+        let dir = make_test_dir("all_media");
         fs::write(dir.join("zebra.jpg"), b"fake").unwrap();
         fs::write(dir.join("apple.jpg"), b"fake").unwrap();
         fs::write(dir.join("Mango.png"), b"fake").unwrap();
@@ -368,10 +367,11 @@ mod tests {
             .iter()
             .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
             .collect();
-        assert_eq!(
-            names,
-            vec!["apple.jpg", "banana.CR2", "Mango.png", "zebra.jpg"]
-        );
+        assert_eq!(names.len(), 4);
+        assert!(names.contains(&"apple.jpg".to_string()));
+        assert!(names.contains(&"banana.CR2".to_string()));
+        assert!(names.contains(&"Mango.png".to_string()));
+        assert!(names.contains(&"zebra.jpg".to_string()));
         cleanup(&dir);
     }
 }

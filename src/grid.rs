@@ -314,7 +314,7 @@ impl Grid {
         self.paths.push(PathBuf::new());
         self.dates.push(None);
         self.live_videos.push(None);
-        self.display_order.push(idx);
+        self.insert_new_tile_into_display_order(idx);
         idx
     }
 
@@ -331,9 +331,7 @@ impl Grid {
         self.paths.push(path);
         self.dates.push(None);
         self.live_videos.push(None);
-        // In DateTaken mode, new tiles go into the unsorted section (after sorted_count).
-        // In Name mode, identity mapping — new tile goes at the end.
-        self.display_order.push(idx);
+        self.insert_new_tile_into_display_order(idx);
         // Batch-log: record when adding first tile or every 100th tile
         if idx == 0 || (idx + 1).is_multiple_of(100) {
             self.record(GridEventKind::TilesAdded {
@@ -458,8 +456,10 @@ impl Grid {
         let n = self.states.len();
         match self.sort_mode {
             SortMode::Name => {
-                // Identity mapping — tiles are already in alphabetical order from NTFS
                 self.display_order = (0..n).collect();
+                let names = &self.names;
+                self.display_order
+                    .sort_by(|&a, &b| Self::compare_tile_names(names, a, b));
                 self.sorted_count = n;
             }
             SortMode::DateTaken => {
@@ -481,6 +481,32 @@ impl Grid {
                 self.display_order.extend(without_dates);
             }
         }
+    }
+
+    fn insert_new_tile_into_display_order(&mut self, idx: usize) {
+        match self.sort_mode {
+            SortMode::Name => {
+                let insert_pos = self
+                    .display_order
+                    .binary_search_by(|&candidate| self.compare_names(candidate, idx))
+                    .unwrap_or_else(|pos| pos);
+                self.display_order.insert(insert_pos, idx);
+                self.sorted_count = self.display_order.len();
+            }
+            SortMode::DateTaken => {
+                self.display_order.push(idx);
+            }
+        }
+    }
+
+    fn compare_names(&self, a: usize, b: usize) -> std::cmp::Ordering {
+        Self::compare_tile_names(&self.names, a, b)
+    }
+
+    fn compare_tile_names(names: &[String], a: usize, b: usize) -> std::cmp::Ordering {
+        let a_lower = names[a].to_ascii_lowercase();
+        let b_lower = names[b].to_ascii_lowercase();
+        a_lower.cmp(&b_lower).then_with(|| names[a].cmp(&names[b]))
     }
 
     /// Insert a tile (that just got a date) into the sorted section.
@@ -1534,8 +1560,21 @@ mod tests {
     fn default_sort_is_name() {
         let g = make_grid(5);
         assert_eq!(g.sort_mode(), SortMode::Name);
-        // Display order should be identity
         assert_eq!(g.display_order(), &[0, 1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn name_sort_inserts_new_tiles_alphabetically() {
+        let mut g = Grid::new(GridConfig::default());
+        let c = g.add_tile_with_path("c.jpg".into());
+        let a = g.add_tile_with_path("a.jpg".into());
+        let b = g.add_tile_with_path("b.jpg".into());
+
+        assert_eq!(g.display_order(), &[a, b, c]);
+        let paths = g.all_paths();
+        assert_eq!(paths[0].to_str().unwrap(), "a.jpg");
+        assert_eq!(paths[1].to_str().unwrap(), "b.jpg");
+        assert_eq!(paths[2].to_str().unwrap(), "c.jpg");
     }
 
     #[test]
@@ -1576,7 +1615,7 @@ mod tests {
     }
 
     #[test]
-    fn switch_back_to_name_restores_identity() {
+    fn switch_back_to_name_restores_alphabetical_order() {
         let mut g = make_grid(5);
         g.set_sort_mode(SortMode::DateTaken);
         g.set_tile_date(2, Some("2023:01:15 10:00:00".into()));

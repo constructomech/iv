@@ -1159,7 +1159,7 @@ pub fn is_raw_extension(path: &Path) -> bool {
 
 /// Decode a video thumbnail by asking ffmpeg to seek near the start and emit
 /// one still frame. This keeps video codec support out of the main binary while
-/// still supporting common iPhone MOV files when ffmpeg is available on PATH.
+/// still supporting common video files when ffmpeg is available on PATH.
 pub fn decode_video_thumbnail(path: &Path, max_size: u32) -> Result<DecodedImage, String> {
     let scale = format!("scale={max_size}:{max_size}:force_original_aspect_ratio=decrease");
     let output = Command::new("ffmpeg")
