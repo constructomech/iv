@@ -171,22 +171,35 @@ impl FolderTree {
 
         let id = ui.make_persistent_id(("folder_tree_node", &node.path));
         let force_open = filter.is_some_and(|filter| node.has_loaded_descendant_match(filter));
+        let mut row_clicked = false;
         let mut header = egui::collapsing_header::CollapsingState::load_with_default_open(
             ui.ctx(),
             id,
             node.expanded,
         )
-        .show_header(ui, |ui| Self::folder_row(ui, node, selected_path, 0.0));
+        .show_header(ui, |ui| {
+            let response = Self::folder_row(ui, node, selected_path, 0.0);
+            row_clicked = response.clicked();
+            response
+        });
         if force_open {
             header.set_open(true);
         }
-
-        node.expanded = header.is_open();
-        if node.expanded {
+        if header.is_open() {
             node.ensure_loading();
         }
 
-        let (_, header_response, _) = header.body(|ui| match &mut node.state {
+        if row_clicked {
+            *selected = Some(node.path.clone());
+            header.toggle();
+            if header.is_open() {
+                node.ensure_loading();
+            }
+        }
+
+        node.expanded = header.is_open();
+
+        let _ = header.body(|ui| match &mut node.state {
             FolderLoadState::Unknown => {}
             FolderLoadState::Loading(_) => {
                 ui.ctx()
@@ -206,10 +219,6 @@ impl FolderTree {
                 );
             }
         });
-
-        if header_response.inner.clicked() {
-            *selected = Some(node.path.clone());
-        }
     }
 
     fn folder_row(

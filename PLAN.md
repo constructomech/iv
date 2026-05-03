@@ -241,7 +241,7 @@
 | Multi-folder / recursive | After Phase 6 | Walk subdirectories |
 | Embed EXIF thumbnails | After Phase 8 | Opt-in CLI command (`iv --embed-thumbnails <folder>`) to losslessly inject EXIF thumbnails into source JPEGs that lack them. One-time cost, permanent speedup. Never automatic. |
 | RAW demosaicing | Far future | Embedded JPEG previews cover viewing. Only needed for "develop" features. |
-| Full video playback | Far future | Thumbnail support is Phase 9; playback requires a separate timing/audio/UI pipeline. |
+| In-app video playback | Far future | Thumbnail support is Phase 9; keep launching the system player for now. Playback needs frame scheduling, buffering, texture upload, audio decode/output, and A/V sync. |
 
 ---
 
