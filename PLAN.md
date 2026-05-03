@@ -46,7 +46,7 @@
 | Windowing + UI | `egui` + `eframe` (wgpu backend) | GPU-rendered, handles scrolling/layout, fast iteration. We manage textures ourselves for progressive rendering. |
 | Image decode (JPEG) | `zune-jpeg` (pure Rust) | ~2-3x faster than `image` crate for JPEG. Pure Rust = zero C deps, cross-platform. Within 10-20% of libjpeg-turbo. |
 | Image decode (other) | `image` crate | PNG, WebP, TIFF, BMP, etc. |
-| HEIC/HEIF decode | Dynamically loaded libheif DLLs | Keeps LGPL libheif and codec libraries replaceable runtime components instead of static app links. |
+| HEIC/HEIF decode | Dynamically loaded libheif DLLs | Keeps LGPL libheif and codec libraries replaceable runtime components instead of static app links; replaces the previous `libheif-rs` dependency. |
 | RAW preview extraction | `kamadak-exif` + raw TIFF/IFD parsing | DNG and CR2 embed full-res JPEG previews. Extract those — don't demosaic sensor data. |
 | EXIF thumbnail | `kamadak-exif` | Extract embedded JPEG thumbnails without decoding the full image. Works on RAW files too (DNG, CR2, NEF, ARW all use EXIF/TIFF structure). |
 | Video thumbnails | Dynamically loaded FFmpeg DLLs | Broad real-world codec/container coverage without shelling to `ffmpeg.exe`; LGPL libraries remain replaceable runtime components. |

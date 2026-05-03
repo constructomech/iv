@@ -7,9 +7,6 @@ fn main() {
         std::process::exit(1);
     }
 
-    // Register HEIF/HEIC decoder hooks so full decode works on HEIC files
-    iv::register_heif_hooks();
-
     for path_str in &args {
         let path = std::path::Path::new(path_str);
         println!("\n=== {} ===", path.display());

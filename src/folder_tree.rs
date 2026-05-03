@@ -68,7 +68,7 @@ impl FolderTree {
 
         let search_response = ui.add_sized(
             [ui.available_width(), 22.0],
-            egui::TextEdit::singleline(&mut self.filter).hint_text("Search folders"),
+            egui::TextEdit::singleline(&mut self.filter).hint_text(rust_i18n::t!("folders.search")),
         );
         if search_response.has_focus() && self.start_recursive_scan() {
             ui.ctx()

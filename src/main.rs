@@ -258,7 +258,7 @@ impl IvApp {
     fn show_folder_pane(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.label(
-                egui::RichText::new("Folders")
+                egui::RichText::new(rust_i18n::t!("folders.title"))
                     .color(egui::Color32::from_rgb(210, 210, 210))
                     .size(14.0)
                     .strong(),
@@ -266,7 +266,7 @@ impl IvApp {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui
                     .add_sized([22.0, 20.0], egui::Button::new("‹"))
-                    .on_hover_text("Hide folders")
+                    .on_hover_text(rust_i18n::t!("folders.hide"))
                     .clicked()
                 {
                     self.folder_pane_open = false;
@@ -284,7 +284,7 @@ impl IvApp {
             if !self.folder_pane_open
                 && ui
                     .add_sized([22.0, 20.0], egui::Button::new("›"))
-                    .on_hover_text("Show folders")
+                    .on_hover_text(rust_i18n::t!("folders.show"))
                     .clicked()
             {
                 self.folder_pane_open = true;

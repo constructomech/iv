@@ -126,7 +126,17 @@ fn main() {
             files.push((r.clone(), "RAW"));
         }
     }
-    for name in ["jpeg.jpg", "tiff.tiff", "png.png", "webp.webp", "gif.gif"] {
+    // HEIC is still benchmarked when an existing generated/cached file is
+    // present, but this example no longer creates one because the main app no
+    // longer carries libheif-rs encoding dependencies.
+    for name in [
+        "jpeg.jpg",
+        "tiff.tiff",
+        "png.png",
+        "webp.webp",
+        "heic.heic",
+        "gif.gif",
+    ] {
         let p = bench_dir.join(name);
         if p.exists() {
             files.push((p, "GEN"));

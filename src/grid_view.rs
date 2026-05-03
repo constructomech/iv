@@ -1056,7 +1056,7 @@ impl GridView {
                     ui.horizontal(|ui| {
                         ui.add_space(4.0);
                         ui.label(
-                            egui::RichText::new("Loading order metadata…")
+                            egui::RichText::new(rust_i18n::t!("status.loading_order_metadata"))
                                 .color(egui::Color32::from_rgb(140, 140, 140))
                                 .size(12.0)
                                 .italics(),
@@ -1233,7 +1233,10 @@ impl GridView {
         let current = self.grid.sort_mode();
         let mut mode = self.grid.sort_mode();
         egui::ComboBox::from_id_salt("grid_sort_mode")
-            .selected_text(format!("Sort: {}", Self::sort_mode_label(mode)))
+            .selected_text(rust_i18n::t!(
+                "sort.label",
+                mode = Self::sort_mode_label(mode)
+            ))
             .show_ui(ui, |ui| {
                 ui.selectable_value(
                     &mut mode,
@@ -1252,10 +1255,10 @@ impl GridView {
         }
     }
 
-    fn sort_mode_label(mode: SortMode) -> &'static str {
+    fn sort_mode_label(mode: SortMode) -> String {
         match mode {
-            SortMode::Name => "Name",
-            SortMode::DateTaken => "Date taken",
+            SortMode::Name => rust_i18n::t!("sort.name").to_string(),
+            SortMode::DateTaken => rust_i18n::t!("sort.date_taken").to_string(),
         }
     }
 
@@ -1340,7 +1343,7 @@ impl GridView {
                     painter.text(
                         rect.center(),
                         egui::Align2::CENTER_CENTER,
-                        "No thumbnail",
+                        rust_i18n::t!("grid.no_thumbnail"),
                         egui::FontId::proportional(12.0),
                         egui::Color32::from_rgb(210, 160, 160),
                     );
@@ -1360,7 +1363,7 @@ impl GridView {
                 painter.text(
                     badge_rect.center(),
                     egui::Align2::CENTER_CENTER,
-                    "Live Image",
+                    rust_i18n::t!("grid.live_image"),
                     egui::FontId::monospace(9.0),
                     egui::Color32::from_rgb(235, 235, 235),
                 );

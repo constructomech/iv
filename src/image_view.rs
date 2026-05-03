@@ -459,7 +459,7 @@ impl ImageView {
             if !self.info_pane_open
                 && ui
                     .add_sized([22.0, 20.0], egui::Button::new("›"))
-                    .on_hover_text("Show info pane")
+                    .on_hover_text(rust_i18n::t!("image.show_info_pane"))
                     .clicked()
             {
                 self.toggle_info_pane();
@@ -471,8 +471,8 @@ impl ImageView {
             );
             if self.current_live_video().is_some()
                 && ui
-                    .add_sized([96.0, 22.0], egui::Button::new("▶ Live"))
-                    .on_hover_text("Play Live Photo movie")
+                    .add_sized([96.0, 22.0], egui::Button::new(rust_i18n::t!("image.live")))
+                    .on_hover_text(rust_i18n::t!("image.play_live_photo_movie"))
                     .clicked()
             {
                 self.open_current_live_video();
@@ -609,7 +609,7 @@ impl ImageView {
     fn render_info_pane(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.label(
-                egui::RichText::new("Info")
+                egui::RichText::new(rust_i18n::t!("image.info.title"))
                     .color(egui::Color32::from_rgb(210, 210, 210))
                     .size(14.0)
                     .strong(),
@@ -617,7 +617,7 @@ impl ImageView {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui
                     .add_sized([22.0, 20.0], egui::Button::new("‹"))
-                    .on_hover_text("Hide info pane")
+                    .on_hover_text(rust_i18n::t!("image.hide_info_pane"))
                     .clicked()
                 {
                     self.toggle_info_pane();
@@ -639,46 +639,94 @@ impl ImageView {
                             path.display().to_string(),
                         )
                     }) else {
-                        Self::info_row(ui, "File", "—");
+                        Self::info_row(
+                            ui,
+                            &rust_i18n::t!("image.info.file"),
+                            &rust_i18n::t!("image.info.not_available"),
+                        );
                         return;
                     };
 
-                    Self::info_row(ui, "File", &name);
+                    Self::info_row(ui, &rust_i18n::t!("image.info.file"), &name);
                     if let Some(modified) = self
                         .image_info
                         .as_ref()
                         .and_then(|info| info.modified.as_deref())
                     {
-                        Self::info_row(ui, "File date", modified);
+                        Self::info_row(ui, &rust_i18n::t!("image.info.file_date"), modified);
                     } else {
-                        Self::info_row(ui, "File date", "Loading...");
+                        Self::info_row(
+                            ui,
+                            &rust_i18n::t!("image.info.file_date"),
+                            &rust_i18n::t!("status.loading"),
+                        );
                     }
 
                     ui.add_space(8.0);
                     ui.label(
-                        egui::RichText::new("EXIF")
+                        egui::RichText::new(rust_i18n::t!("image.info.exif"))
                             .color(egui::Color32::from_rgb(170, 170, 170))
                             .size(11.0)
                             .strong(),
                     );
 
                     if let Some(info) = &self.image_info {
-                        Self::info_row_opt(ui, "Date taken", info.exif.date_taken.as_deref());
-                        Self::info_row_opt(ui, "Camera", info.exif.camera.as_deref());
-                        Self::info_row_opt(ui, "Lens", info.exif.lens.as_deref());
-                        Self::info_row_opt(ui, "Focal length", info.exif.focal_length.as_deref());
-                        Self::info_row_opt(ui, "Aperture", info.exif.aperture.as_deref());
-                        Self::info_row_opt(ui, "Shutter", info.exif.shutter_speed.as_deref());
-                        Self::info_row_opt(ui, "ISO", info.exif.iso.as_deref());
+                        Self::info_row_opt(
+                            ui,
+                            &rust_i18n::t!("image.info.date_taken"),
+                            info.exif.date_taken.as_deref(),
+                        );
+                        Self::info_row_opt(
+                            ui,
+                            &rust_i18n::t!("image.info.camera"),
+                            info.exif.camera.as_deref(),
+                        );
+                        Self::info_row_opt(
+                            ui,
+                            &rust_i18n::t!("image.info.lens"),
+                            info.exif.lens.as_deref(),
+                        );
+                        Self::info_row_opt(
+                            ui,
+                            &rust_i18n::t!("image.info.focal_length"),
+                            info.exif.focal_length.as_deref(),
+                        );
+                        Self::info_row_opt(
+                            ui,
+                            &rust_i18n::t!("image.info.aperture"),
+                            info.exif.aperture.as_deref(),
+                        );
+                        Self::info_row_opt(
+                            ui,
+                            &rust_i18n::t!("image.info.shutter"),
+                            info.exif.shutter_speed.as_deref(),
+                        );
+                        Self::info_row_opt(
+                            ui,
+                            &rust_i18n::t!("image.info.iso"),
+                            info.exif.iso.as_deref(),
+                        );
                     } else {
-                        Self::info_row(ui, "Date taken", "Loading...");
-                        Self::info_row(ui, "Camera", "Loading...");
-                        Self::info_row(ui, "Focal length", "Loading...");
+                        Self::info_row(
+                            ui,
+                            &rust_i18n::t!("image.info.date_taken"),
+                            &rust_i18n::t!("status.loading"),
+                        );
+                        Self::info_row(
+                            ui,
+                            &rust_i18n::t!("image.info.camera"),
+                            &rust_i18n::t!("status.loading"),
+                        );
+                        Self::info_row(
+                            ui,
+                            &rust_i18n::t!("image.info.focal_length"),
+                            &rust_i18n::t!("status.loading"),
+                        );
                     }
 
                     ui.add_space(8.0);
                     ui.label(
-                        egui::RichText::new("Develop")
+                        egui::RichText::new(rust_i18n::t!("image.info.develop"))
                             .color(egui::Color32::from_rgb(170, 170, 170))
                             .size(11.0)
                             .strong(),
@@ -689,20 +737,28 @@ impl ImageView {
 
                     if let Some(info) = &self.image_info {
                         if !info.develop.has_visible_settings() {
-                            Self::info_row(ui, "Settings", "—");
+                            Self::info_row(
+                                ui,
+                                &rust_i18n::t!("image.info.settings"),
+                                &rust_i18n::t!("image.info.not_available"),
+                            );
                         } else {
                             let source = info
                                 .develop
                                 .source
                                 .map(|source| source.label())
                                 .unwrap_or("XMP");
-                            Self::info_row(ui, "Source", source);
+                            Self::info_row(ui, &rust_i18n::t!("image.info.source"), source);
                             for setting in info.develop.visible_settings() {
                                 Self::develop_row(ui, setting, self.apply_lossless_edits);
                             }
                         }
                     } else {
-                        Self::info_row(ui, "Settings", "Loading...");
+                        Self::info_row(
+                            ui,
+                            &rust_i18n::t!("image.info.settings"),
+                            &rust_i18n::t!("status.loading"),
+                        );
                     }
 
                     ui.add_space(8.0);
@@ -772,16 +828,20 @@ impl ImageView {
         ui.painter().text(
             egui::pos2(switch_rect.right() + 8.0, rect.center().y),
             egui::Align2::LEFT_CENTER,
-            "Apply lossless edits",
+            rust_i18n::t!("image.info.apply_lossless_edits"),
             egui::FontId::proportional(12.0),
             egui::Color32::from_rgb(205, 205, 205),
         );
 
-        response.on_hover_text("Reload this image with or without XMP develop transforms")
+        response.on_hover_text(rust_i18n::t!("image.info.apply_lossless_edits_hover"))
     }
 
     fn info_row_opt(ui: &mut egui::Ui, label: &str, value: Option<&str>) {
-        Self::info_row(ui, label, value.unwrap_or("—"));
+        Self::info_row(
+            ui,
+            label,
+            value.unwrap_or(&rust_i18n::t!("image.info.not_available")),
+        );
     }
 
     fn info_row(ui: &mut egui::Ui, label: &str, value: &str) {

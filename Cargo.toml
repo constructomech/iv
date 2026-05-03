@@ -43,6 +43,9 @@ opt-level = 2
 [package.metadata.vcpkg]
 git = "https://github.com/microsoft/vcpkg"
 rev = "2026.01.16"
+# LibRaw is LGPL-2.1-only OR CDDL-1.0; static linking relies on the CDDL option.
+# LGPL components without a permissive static-linking alternative are loaded via
+# runtime DLL wrappers instead of this static-md triplet.
 install = ["libraw"]
 
 [package.metadata.vcpkg.target]

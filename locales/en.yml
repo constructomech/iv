@@ -1,11 +1,50 @@
 status:
   item_count: "%{count} items"
+  loading: "Loading..."
+  loading_order_metadata: "Loading order metadata..."
 
 window:
   title: "iv — %{name}"
 
 image:
   status: "%{filename} — %{current}/%{total}"
+  show_info_pane: "Show info pane"
+  hide_info_pane: "Hide info pane"
+  live: "▶ Live"
+  play_live_photo_movie: "Play Live Photo movie"
+  info:
+    title: "Info"
+    file: "File"
+    file_date: "File date"
+    exif: "EXIF"
+    date_taken: "Date taken"
+    camera: "Camera"
+    lens: "Lens"
+    focal_length: "Focal length"
+    aperture: "Aperture"
+    shutter: "Shutter"
+    iso: "ISO"
+    develop: "Develop"
+    settings: "Settings"
+    source: "Source"
+    not_available: "—"
+    apply_lossless_edits: "Apply lossless edits"
+    apply_lossless_edits_hover: "Reload this image with or without XMP develop transforms"
+
+folders:
+  title: "Folders"
+  search: "Search folders"
+  show: "Show folders"
+  hide: "Hide folders"
+
+grid:
+  no_thumbnail: "No thumbnail"
+  live_image: "Live Image"
+
+sort:
+  label: "Sort: %{mode}"
+  name: "Name"
+  date_taken: "Date taken"
 
 error:
   path_not_found: "Error: path does not exist: %{path}"

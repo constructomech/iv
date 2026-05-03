@@ -32,6 +32,3 @@ pub use media::{
     IMAGE_EXTENSIONS, MediaKind, VIDEO_EXTENSIONS, is_image_file, is_media_file, is_video_file,
     media_kind_for_path,
 };
-
-/// Kept for diagnostic examples; HEIC decoding now uses iv's dynamic libheif wrapper.
-pub fn register_heif_hooks() {}

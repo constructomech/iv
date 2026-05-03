@@ -279,7 +279,10 @@ first thumbnail to RGBA. HEIC files store thumbnails as separate image items in
 the container (not in EXIF tags), so the EXIF approach doesn't work for them.
 The main executable does not link to libheif import libraries or require
 `heif.dll` at startup; distributed builds must ship the LGPL libheif runtime
-DLLs beside the executable or make them available on `PATH`.
+DLLs beside the executable or make them available on `PATH`. Removing
+`libheif-rs` also removes its Rust-only helper dependencies from `Cargo.lock`;
+the actual HEIC decoder code now lives in the external vcpkg runtime DLLs
+(`heif.dll`, `libde265.dll`, `aom.dll`, and their dependencies).
 
 **Video files**: `.mov`, `.mp4`, `.webm`, `.mkv`, `.avi`, `.3gp`, `.mpg`, `.mpeg`, `.vob`, and `.wmv` entries are enumerated into the
 same grid but use a separate `VideoThumbnail` work tier. `decode_video_thumbnail()`
@@ -305,6 +308,10 @@ The bottleneck is I/O latency, not decode time.
 dynamic libheif wrapper, which applies HEIF transforms internally. Other image
 formats decode via the `image` crate, apply EXIF orientation, and downscale to
 160×160 using `image::imageops::thumbnail()`.
+
+The drawback of skipping the `image` crate for HEIC is a little more local FFI
+code and a separate downscale step in Rust. The benefit is that the LGPL libheif
+stack is loaded dynamically and remains replaceable for distribution.
 
 **Typical timing**: 100–600ms depending on format and I/O. HEIC full
 decode is the slowest due to HEVC/AV1 decompression.
@@ -366,6 +373,9 @@ A thin C wrapper (`src/libraw_wrapper.c`) encapsulates the full pipeline
 in one function call, avoiding any Rust dependency on LibRaw's complex
 `libraw_data_t` struct layout. LibRaw and its transitive dependencies
 (lcms2, zlib, jasper, jpeg) are installed via vcpkg and linked statically.
+LibRaw is not MIT; vcpkg reports `LGPL-2.1-only OR CDDL-1.0`. We currently rely
+on the CDDL option for static linking. If we decide to avoid CDDL too, LibRaw
+should get the same runtime-DLL treatment as libheif and FFmpeg.
 
 If LibRaw fails, the viewer falls back to `load_raw_preview()` which
 extracts the largest embedded JPEG preview from the TIFF IFD structure
