@@ -9,6 +9,7 @@
 #include <libavcodec/avcodec.h>
 #include <libavcodec/packet.h>
 #include <libavformat/avformat.h>
+#include <libavutil/display.h>
 #include <libavutil/error.h>
 #include <libavutil/imgutils.h>
 #include <libavutil/log.h>
@@ -59,6 +60,7 @@ typedef struct IvFfmpegApi {
     void (*av_packet_unref)(AVPacket *pkt);
     AVFrame *(*av_frame_alloc)(void);
     void (*av_frame_free)(AVFrame **frame);
+    double (*av_display_rotation_get)(const int32_t matrix[9]);
     int (*av_image_fill_arrays)(uint8_t *dst_data[4], int dst_linesize[4], const uint8_t *src, enum AVPixelFormat pix_fmt, int width, int height, int align);
     void (*av_log_set_level)(int level);
     int (*av_strerror)(int errnum, char *errbuf, size_t errbuf_size);
@@ -144,6 +146,7 @@ static int iv_ffmpeg_load_inner(void) {
     IV_LOAD_SYMBOL(avcodec, av_packet_unref);
     IV_LOAD_SYMBOL(avutil, av_frame_alloc);
     IV_LOAD_SYMBOL(avutil, av_frame_free);
+    IV_LOAD_SYMBOL(avutil, av_display_rotation_get);
     IV_LOAD_SYMBOL(avutil, av_image_fill_arrays);
     IV_LOAD_SYMBOL(avutil, av_log_set_level);
     IV_LOAD_SYMBOL(avutil, av_strerror);
@@ -214,6 +217,79 @@ static int iv_frame_brightness_score(const unsigned char *rgba, int width, int h
     return bright * 100 / samples + varied * 30 / samples;
 }
 
+static int iv_normalize_rotation(double rotation) {
+    if (isnan(rotation)) return 0;
+
+    int degrees = (int)floor(rotation + (rotation >= 0.0 ? 0.5 : -0.5));
+    degrees %= 360;
+    if (degrees < 0) degrees += 360;
+
+    if (degrees >= 315 || degrees < 45) return 0;
+    if (degrees < 135) return 90;
+    if (degrees < 225) return 180;
+    return 270;
+}
+
+static int iv_stream_rotation_degrees(const AVStream *stream) {
+    if (!stream || !stream->codecpar || !stream->codecpar->coded_side_data) return 0;
+
+    const AVPacketSideData *side_data = g_ffmpeg.av_packet_side_data_get(
+        stream->codecpar->coded_side_data,
+        stream->codecpar->nb_coded_side_data,
+        AV_PKT_DATA_DISPLAYMATRIX);
+    if (!side_data || side_data->size < sizeof(int32_t) * 9) return 0;
+
+    return iv_normalize_rotation(g_ffmpeg.av_display_rotation_get((const int32_t *)side_data->data));
+}
+
+static int iv_apply_rotation(unsigned char **data, int *width, int *height, int rotation, char *err, int err_len) {
+    if (!data || !*data || !width || !height) return -1;
+
+    int src_w = *width;
+    int src_h = *height;
+    if (rotation == 0) return 0;
+    if (src_w <= 0 || src_h <= 0) return -1;
+
+    int dst_w = (rotation == 90 || rotation == 270) ? src_h : src_w;
+    int dst_h = (rotation == 90 || rotation == 270) ? src_w : src_h;
+    size_t len = (size_t)dst_w * (size_t)dst_h * 4;
+    unsigned char *rotated = (unsigned char *)malloc(len);
+    if (!rotated) {
+        snprintf(err, (size_t)err_len, "failed to allocate rotated video thumbnail buffer");
+        return -1;
+    }
+
+    const unsigned char *src = *data;
+    for (int y = 0; y < src_h; y++) {
+        for (int x = 0; x < src_w; x++) {
+            int dst_x = x;
+            int dst_y = y;
+
+            if (rotation == 90) {
+                dst_x = src_h - 1 - y;
+                dst_y = x;
+            } else if (rotation == 180) {
+                dst_x = src_w - 1 - x;
+                dst_y = src_h - 1 - y;
+            } else if (rotation == 270) {
+                dst_x = y;
+                dst_y = src_w - 1 - x;
+            }
+
+            memcpy(
+                rotated + ((size_t)dst_y * (size_t)dst_w + (size_t)dst_x) * 4,
+                src + ((size_t)y * (size_t)src_w + (size_t)x) * 4,
+                4);
+        }
+    }
+
+    free(*data);
+    *data = rotated;
+    *width = dst_w;
+    *height = dst_h;
+    return 0;
+}
+
 static int iv_scale_frame_to_rgba(const AVFrame *frame, int max_size, unsigned char **out_data, int *out_width, int *out_height, char *err, int err_len) {
     if (!frame || !out_data || !out_width || !out_height || max_size <= 0) return -1;
     if (frame->width <= 0 || frame->height <= 0) {
@@ -265,7 +341,7 @@ static int iv_scale_frame_to_rgba(const AVFrame *frame, int max_size, unsigned c
     return 0;
 }
 
-static int iv_try_receive_frame(AVCodecContext *codec_ctx, AVFrame *frame, int max_size, unsigned char **best_data, int *best_width, int *best_height, int *best_score, char *err, int err_len) {
+static int iv_try_receive_frame(AVCodecContext *codec_ctx, AVFrame *frame, int max_size, int rotation, unsigned char **best_data, int *best_width, int *best_height, int *best_score, char *err, int err_len) {
     int ret;
     int received = 0;
 
@@ -276,6 +352,9 @@ static int iv_try_receive_frame(AVCodecContext *codec_ctx, AVFrame *frame, int m
         int width = 0;
         int height = 0;
         ret = iv_scale_frame_to_rgba(frame, max_size, &rgba, &width, &height, err, err_len);
+        if (ret < 0) return ret;
+
+        ret = iv_apply_rotation(&rgba, &width, &height, rotation, err, err_len);
         if (ret < 0) return ret;
 
         int score = iv_frame_brightness_score(rgba, width, height);
@@ -337,6 +416,7 @@ int iv_ffmpeg_decode_thumbnail(const char *path, int max_size, unsigned char **o
     }
 
     AVStream *stream = fmt_ctx->streams[stream_index];
+    int rotation = iv_stream_rotation_degrees(stream);
     if (!decoder) decoder = g_ffmpeg.avcodec_find_decoder(stream->codecpar->codec_id);
     if (!decoder) {
         snprintf(err, (size_t)err_len, "no FFmpeg decoder found for video stream");
@@ -383,7 +463,7 @@ int iv_ffmpeg_decode_thumbnail(const char *path, int max_size, unsigned char **o
                 goto fail_ffmpeg;
             }
 
-            ret = iv_try_receive_frame(codec_ctx, frame, max_size, &best_data, &best_width, &best_height, &best_score, err, err_len);
+            ret = iv_try_receive_frame(codec_ctx, frame, max_size, rotation, &best_data, &best_width, &best_height, &best_score, err, err_len);
             if (ret < 0) goto cleanup;
             if (ret == 1 && best_score >= 35) break;
         } else {
@@ -393,7 +473,7 @@ int iv_ffmpeg_decode_thumbnail(const char *path, int max_size, unsigned char **o
 
     ret = g_ffmpeg.avcodec_send_packet(codec_ctx, NULL);
     if (ret >= 0) {
-        ret = iv_try_receive_frame(codec_ctx, frame, max_size, &best_data, &best_width, &best_height, &best_score, err, err_len);
+        ret = iv_try_receive_frame(codec_ctx, frame, max_size, rotation, &best_data, &best_width, &best_height, &best_score, err, err_len);
         if (ret < 0) goto cleanup;
     }
 
