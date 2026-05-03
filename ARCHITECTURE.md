@@ -279,10 +279,14 @@ HEIC files store thumbnails as separate image items in the container (not
 in EXIF tags), so the EXIF approach doesn't work for them.
 
 **Video files**: `.mov`, `.mp4`, `.webm`, `.mkv`, `.avi`, `.3gp`, `.mpg`, `.mpeg`, `.vob`, and `.wmv` entries are enumerated into the
-same grid but use a separate `VideoThumbnail` work tier. The worker invokes
-`ffmpeg` from `PATH`, seeks near the start, decodes a single frame to PNG on
-stdout, then converts that frame to the existing RGBA `DecodedImage` texture
-path. If `ffmpeg` is missing or the codec is unsupported, the tile transitions
+same grid but use a separate `VideoThumbnail` work tier. `decode_video_thumbnail()`
+calls a small C wrapper that dynamically loads FFmpeg DLLs (`avcodec`,
+`avformat`, `avutil`, `swscale`) at thumbnail time, seeks near the start, decodes
+early frames, keeps the best non-black candidate, scales it to RGBA, and returns
+the existing `DecodedImage` texture path. The main executable does not link to
+FFmpeg import libraries or require the DLLs at startup; distributed builds must
+ship the LGPL FFmpeg DLLs beside the executable or make them available on
+`PATH`. If the DLLs are missing or the codec is unsupported, the tile transitions
 to `Failed` and remains visible with a video/error placeholder. Video thumbnails
 are scheduled only for visible tiles and are not used by date sorting. Standalone
 video tiles launch the OS default video player when clicked. Live Photo image

@@ -1,6 +1,10 @@
 fn main() {
+    println!("cargo:rerun-if-changed=src/libraw_wrapper.c");
+    println!("cargo:rerun-if-changed=src/ffmpeg_wrapper.c");
+
     // Locate vcpkg installation (same directory used by libheif-sys).
     let vcpkg_root = std::path::Path::new("target/vcpkg/installed/x64-windows-static-md");
+    let ffmpeg_root = std::path::Path::new("target/vcpkg/installed/x64-windows");
 
     // Link LibRaw and its transitive dependencies as static libraries.
     println!(
@@ -18,4 +22,12 @@ fn main() {
     cc.file("src/libraw_wrapper.c");
     cc.include(vcpkg_root.join("include"));
     cc.compile("iv_libraw");
+
+    // Compile the FFmpeg wrapper against dynamic vcpkg headers. The wrapper
+    // loads FFmpeg DLLs with LoadLibrary, so we intentionally do not link the
+    // main executable against FFmpeg import libraries.
+    let mut ffmpeg_cc = cc::Build::new();
+    ffmpeg_cc.file("src/ffmpeg_wrapper.c");
+    ffmpeg_cc.include(ffmpeg_root.join("include"));
+    ffmpeg_cc.compile("iv_ffmpeg");
 }

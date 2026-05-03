@@ -1,6 +1,7 @@
+use std::ffi::{CStr, CString};
 use std::io::{BufReader, Cursor, Read};
+use std::os::raw::{c_char, c_int};
 use std::path::Path;
-use std::process::Command;
 
 use crate::app::DecodedImage;
 
@@ -1157,54 +1158,69 @@ pub fn is_raw_extension(path: &Path) -> bool {
     }
 }
 
-/// Decode a video thumbnail by asking ffmpeg to seek near the start and emit
-/// one still frame. This keeps video codec support out of the main binary while
-/// still supporting common video files when ffmpeg is available on PATH.
+/// Decode a video thumbnail through dynamically loaded FFmpeg libraries.
 pub fn decode_video_thumbnail(path: &Path, max_size: u32) -> Result<DecodedImage, String> {
-    let scale = format!("scale={max_size}:{max_size}:force_original_aspect_ratio=decrease");
-    let output = Command::new("ffmpeg")
-        .args([
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-ss",
-            "00:00:00.100",
-            "-i",
-        ])
-        .arg(path)
-        .args([
-            "-frames:v",
-            "1",
-            "-vf",
-            &scale,
-            "-f",
-            "image2pipe",
-            "-vcodec",
-            "png",
-            "-",
-        ])
-        .output()
-        .map_err(|e| {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                "ffmpeg not found on PATH".to_string()
-            } else {
-                format!("failed to run ffmpeg: {e}")
-            }
-        })?;
+    let path = path
+        .to_str()
+        .ok_or_else(|| format!("video path is not valid UTF-8: {}", path.display()))?;
+    let path = CString::new(path).map_err(|_| "video path contains an interior NUL".to_string())?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("ffmpeg failed: {}", stderr.trim()));
+    let mut out_data: *mut u8 = std::ptr::null_mut();
+    let mut width: c_int = 0;
+    let mut height: c_int = 0;
+    let mut error = [0 as c_char; 512];
+
+    let ret = unsafe {
+        iv_ffmpeg_decode_thumbnail(
+            path.as_ptr(),
+            max_size as c_int,
+            &mut out_data,
+            &mut width,
+            &mut height,
+            error.as_mut_ptr(),
+            error.len() as c_int,
+        )
+    };
+
+    if ret != 0 || out_data.is_null() || width <= 0 || height <= 0 {
+        if !out_data.is_null() {
+            unsafe { iv_ffmpeg_free(out_data) };
+        }
+        let message = unsafe { CStr::from_ptr(error.as_ptr()) }
+            .to_string_lossy()
+            .trim()
+            .to_string();
+        return Err(if message.is_empty() {
+            format!("FFmpeg video thumbnail decode failed with code {ret}")
+        } else {
+            message
+        });
     }
 
-    let img = image::load_from_memory(&output.stdout)
-        .map_err(|e| format!("failed to decode ffmpeg thumbnail: {e}"))?;
-    let rgba = img.to_rgba8();
+    let len = width as usize * height as usize * 4;
+    let pixels = unsafe { std::slice::from_raw_parts(out_data, len) }.to_vec();
+    unsafe { iv_ffmpeg_free(out_data) };
+
     Ok(DecodedImage {
-        width: rgba.width(),
-        height: rgba.height(),
-        pixels: rgba.into_raw(),
+        width: width as u32,
+        height: height as u32,
+        pixels,
     })
+}
+
+#[link(name = "iv_ffmpeg", kind = "static")]
+unsafe extern "C" {
+    fn iv_ffmpeg_decode_thumbnail(
+        path: *const c_char,
+        max_size: c_int,
+        out_data: *mut *mut u8,
+        out_width: *mut c_int,
+        out_height: *mut c_int,
+        err: *mut c_char,
+        err_len: c_int,
+    ) -> c_int;
+
+    fn iv_ffmpeg_free(ptr: *mut u8);
 }
 
 // ---------------------------------------------------------------------------

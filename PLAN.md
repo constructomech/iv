@@ -48,6 +48,7 @@
 | Image decode (other) | `image` crate | PNG, WebP, TIFF, BMP, etc. |
 | RAW preview extraction | `kamadak-exif` + raw TIFF/IFD parsing | DNG and CR2 embed full-res JPEG previews. Extract those — don't demosaic sensor data. |
 | EXIF thumbnail | `kamadak-exif` | Extract embedded JPEG thumbnails without decoding the full image. Works on RAW files too (DNG, CR2, NEF, ARW all use EXIF/TIFF structure). |
+| Video thumbnails | Dynamically loaded FFmpeg DLLs | Broad real-world codec/container coverage without shelling to `ffmpeg.exe`; LGPL libraries remain replaceable runtime components. |
 | Async runtime | `tokio` (multi-thread) | IOCP on Windows = true overlapped I/O. Good ecosystem. |
 | Parallelism | `rayon` (for CPU-bound decode) | Work-stealing pool for image decoding, separate from I/O. |
 | Channel | `crossbeam-channel` or `tokio::sync::mpsc` | Communication between I/O, decode, and render threads. |
@@ -199,6 +200,7 @@
 - Support `.mkv` containers where the selected decoder supports the contained codec
 - Support observed legacy formats through the same decoder path: `.avi`, `.3gp`, `.mpg`, `.mpeg`, `.vob`, `.wmv`
 - Extract a representative thumbnail frame near the beginning of the video, avoiding full-file decode
+- Decode through FFmpeg DLLs loaded at runtime (`avcodec`, `avformat`, `avutil`, `swscale`) rather than requiring `ffmpeg.exe` on `PATH`
 - Apply orientation/rotation metadata before uploading the thumbnail texture
 - Show a classic play affordance on video thumbnails: a translucent circle with a right-facing triangle, not a text `VIDEO` tag
 - Launch the OS default video player when a standalone video tile is clicked
@@ -318,6 +320,10 @@ Tests grow with each phase. No test fixtures are checked in — synthetic images
 ```bash
 # Build (release for perf testing)
 cargo build --release
+
+# Windows video thumbnail support uses FFmpeg DLLs loaded at runtime.
+# Ship the vcpkg FFmpeg runtime DLLs beside iv.exe, or put them on PATH.
+# Local dev builds also look in target/vcpkg/installed/x64-windows/bin.
 
 # Run on a folder
 iv "D:\Photos\Vacation"      # Windows
