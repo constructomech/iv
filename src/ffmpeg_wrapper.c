@@ -239,7 +239,9 @@ static int iv_stream_rotation_degrees(const AVStream *stream) {
         AV_PKT_DATA_DISPLAYMATRIX);
     if (!side_data || side_data->size < sizeof(int32_t) * 9) return 0;
 
-    return iv_normalize_rotation(g_ffmpeg.av_display_rotation_get((const int32_t *)side_data->data));
+    // FFmpeg reports display-matrix rotation counterclockwise; iv_apply_rotation
+    // maps pixels clockwise.
+    return iv_normalize_rotation(-g_ffmpeg.av_display_rotation_get((const int32_t *)side_data->data));
 }
 
 static int iv_apply_rotation(unsigned char **data, int *width, int *height, int rotation, char *err, int err_len) {
