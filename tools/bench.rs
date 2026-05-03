@@ -5,7 +5,7 @@
 /// and full-decode performance for each format.
 ///
 /// Usage:
-///   cargo run --release --example bench -- --raw <source.raw> [--raw extra.raw ...]
+///   cargo run --release --bin iv-bench -- --raw <source.raw> [--raw extra.raw ...]
 ///
 /// Generated files are cached next to the source. Delete to regenerate.
 use image::{ImageFormat, RgbImage, RgbaImage};
@@ -69,7 +69,7 @@ fn validate_existing_path(value: &str) -> PathBuf {
 }
 
 fn print_usage_and_exit() -> ! {
-    eprintln!("Usage: bench --raw <source.raw> [--raw extra.raw ...]");
+    eprintln!("Usage: iv-bench --raw <source.raw> [--raw extra.raw ...]");
     eprintln!(
         "The first --raw file seeds generated comparison images; later raw files are benchmarked as extra RAW rows."
     );

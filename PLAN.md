@@ -151,7 +151,7 @@
 ### Phase 6 — Decode Benchmark Suite
 **Goal:** Establish a repeatable benchmark for measuring and comparing decode techniques.
 
-- `examples/bench.rs` — generates high-res (4000×3000 = 12MP) test images in all supported formats
+- `tools/bench.rs` (`iv-bench`) — generates high-res test images in all supported formats
 - Test variants:
   - JPEG without EXIF thumbnail
   - JPEG with embedded EXIF thumbnail (manually constructed APP1)
@@ -160,9 +160,8 @@
   - EXIF extraction time (file read + EXIF parse + thumbnail decode)
   - Full decode + downscale time (file read + decode + orientation + resize)
   - Output thumbnail dimensions
-- Configurable thumbnail resolution (`--thumb-size`)
 - Reusable image directory (regenerate by deleting)
-- **Exit criterion:** `cargo run --release --example bench` produces a comparison table.
+- **Exit criterion:** `cargo run --release --bin iv-bench -- --raw <source.raw>` produces a comparison table.
 
 ### Phase 7 — Scroll Virtualization + Large Folder Performance  
 **Goal:** Handle 100k+ image folders without lag.

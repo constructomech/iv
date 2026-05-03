@@ -17,8 +17,12 @@ name = "iv"
 path = "src/main.rs"
 
 [[bin]]
-name = "lint-i18n"
+name = "iv-lint-i18n"
 path = "tools/lint_i18n.rs"
+
+[[bin]]
+name = "iv-bench"
+path = "tools/bench.rs"
 
 [dependencies]
 eframe = "0.31"

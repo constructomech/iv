@@ -95,10 +95,10 @@ Temp files are cleaned up automatically.
 
 ```bash
 # Run the decode benchmark (generates test images on first run)
-cargo run --release --example bench
+cargo run --release --bin iv-bench -- --raw path/to/source.raw
 
-# Custom thumbnail size and image directory
-cargo run --release --example bench -- --thumb-size 256 --dir path/to/bench_images
+# Add extra RAW rows to the generated-format comparison
+cargo run --release --bin iv-bench -- --raw path/to/source.raw --raw path/to/extra.raw
 ```
 
 Benchmarks all supported formats (JPEG, PNG, WebP, TIFF, BMP, GIF, HEIC) at 12MP,
@@ -142,7 +142,6 @@ This project includes VS Code configuration in `.vscode/`:
 iv/
 ├── .vscode/              # VS Code build/debug/settings
 ├── examples/
-│   ├── bench.rs          # Decode benchmark suite
 │   └── exif_diag.rs      # EXIF thumbnail extraction diagnostics
 ├── iv-thumb/             # Separate GPL-licensed thumbnail embedder (not a workspace member)
 ├── locales/
@@ -160,6 +159,9 @@ iv/
 │   ├── common/
 │   │   └── mod.rs        # Test helpers — synthetic image generation
 │   └── image_loading.rs  # Integration tests for the load pipeline
+├── tools/
+│   ├── bench.rs          # Decode benchmark suite (`iv-bench`)
+│   └── lint_i18n.rs      # Hard-coded UI string lint (`iv-lint-i18n`)
 ├── Cargo.toml
 ├── ARCHITECTURE.md       # Grid, tile state machine, worker model docs
 ├── PLAN.md               # Phased development plan
