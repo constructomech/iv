@@ -2,6 +2,7 @@ status:
   item_count: "%{count} items"
   loading: "Loading..."
   loading_order_metadata: "Loading order metadata..."
+  tile_size: "%{size}px"
 
 window:
   title: "iv — %{name}"
@@ -10,6 +11,8 @@ image:
   status: "%{filename} — %{current}/%{total}"
   show_info_pane: "Show info pane"
   hide_info_pane: "Hide info pane"
+  show_info_pane_button: "›"
+  hide_info_pane_button: "‹"
   live: "▶ Live"
   play_live_photo_movie: "Play Live Photo movie"
   info:
@@ -36,6 +39,8 @@ folders:
   search: "Search folders"
   show: "Show folders"
   hide: "Hide folders"
+  show_button: "›"
+  hide_button: "‹"
 
 grid:
   no_thumbnail: "No thumbnail"

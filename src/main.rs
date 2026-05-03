@@ -265,7 +265,7 @@ impl IvApp {
             );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui
-                    .add_sized([22.0, 20.0], egui::Button::new("‹"))
+                    .add_sized([22.0, 20.0], egui::Button::new(t!("folders.hide_button")))
                     .on_hover_text(rust_i18n::t!("folders.hide"))
                     .clicked()
                 {
@@ -283,7 +283,7 @@ impl IvApp {
         ui.horizontal(|ui| {
             if !self.folder_pane_open
                 && ui
-                    .add_sized([22.0, 20.0], egui::Button::new("›"))
+                    .add_sized([22.0, 20.0], egui::Button::new(t!("folders.show_button")))
                     .on_hover_text(rust_i18n::t!("folders.show"))
                     .clicked()
             {

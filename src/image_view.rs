@@ -458,7 +458,10 @@ impl ImageView {
         ui.horizontal(|ui| {
             if !self.info_pane_open
                 && ui
-                    .add_sized([22.0, 20.0], egui::Button::new("›"))
+                    .add_sized(
+                        [22.0, 20.0],
+                        egui::Button::new(rust_i18n::t!("image.show_info_pane_button")),
+                    )
                     .on_hover_text(rust_i18n::t!("image.show_info_pane"))
                     .clicked()
             {
@@ -616,7 +619,10 @@ impl ImageView {
             );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui
-                    .add_sized([22.0, 20.0], egui::Button::new("‹"))
+                    .add_sized(
+                        [22.0, 20.0],
+                        egui::Button::new(rust_i18n::t!("image.hide_info_pane_button")),
+                    )
                     .on_hover_text(rust_i18n::t!("image.hide_info_pane"))
                     .clicked()
                 {

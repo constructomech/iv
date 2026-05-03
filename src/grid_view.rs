@@ -288,7 +288,7 @@ impl GridView {
                         match req.tier {
                             WorkTier::EmbeddedOnly => {
                                 let thumb = if req.is_heif {
-                                    decode::try_heif_thumbnail_from_bytes(&req.data)
+                                    decode::try_heif_thumbnail(&req.path)
                                 } else {
                                     decode::try_embedded_from_bytes(&req.data)
                                 };
@@ -303,17 +303,10 @@ impl GridView {
                                         });
                                     }
                                     None => {
-                                        // For HEIC, pass file bytes for FullDecode reuse —
-                                        // but only if we have enough data (not a small probe).
-                                        let data = if req.is_heif && req.data.len() > PROBE_SIZE {
-                                            Some(req.data)
-                                        } else {
-                                            None
-                                        };
                                         let _ = result_tx.send(WorkResult::EmbeddedMiss {
                                             idx: req.idx,
                                             ms,
-                                            data,
+                                            data: None,
                                             generation: req.generation,
                                         });
                                     }
@@ -904,6 +897,7 @@ impl GridView {
             }
 
             let data = match tier {
+                WorkTier::EmbeddedOnly if is_heif => Some(Vec::new()),
                 WorkTier::EmbeddedOnly => {
                     io_read_embedded_smart(&path, &gen_counter, generation, is_heif)
                 }
@@ -1145,9 +1139,12 @@ impl GridView {
                 self.grid.set_tile_size(self.tile_size, self.tile_size);
             }
             ui.label(
-                egui::RichText::new(format!("{}px", self.tile_size as u32))
-                    .color(egui::Color32::from_rgb(120, 120, 120))
-                    .size(11.0),
+                egui::RichText::new(rust_i18n::t!(
+                    "status.tile_size",
+                    size = self.tile_size as u32
+                ))
+                .color(egui::Color32::from_rgb(120, 120, 120))
+                .size(11.0),
             );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.label(

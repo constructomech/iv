@@ -37,6 +37,15 @@ typedef struct IvHeifApi {
     heif_error (*heif_image_handle_get_thumbnail)(const heif_image_handle *main_image_handle, heif_item_id thumbnail_id, heif_image_handle **out_thumbnail_handle);
 
     heif_error (*heif_decode_image)(const heif_image_handle *in_handle, heif_image **out_img, enum heif_colorspace colorspace, enum heif_chroma chroma, const heif_decoding_options *options);
+    heif_error (*heif_context_get_encoder_for_format)(heif_context *context, enum heif_compression_format format, heif_encoder **encoder);
+    void (*heif_encoder_release)(heif_encoder *encoder);
+    heif_error (*heif_encoder_set_lossy_quality)(heif_encoder *encoder, int quality);
+    heif_error (*heif_image_create)(int width, int height, enum heif_colorspace colorspace, enum heif_chroma chroma, heif_image **out_image);
+    heif_error (*heif_image_add_plane)(heif_image *image, enum heif_channel channel, int width, int height, int bit_depth);
+    uint8_t *(*heif_image_get_plane)(heif_image *image, enum heif_channel channel, int *out_stride);
+    heif_error (*heif_context_encode_image)(heif_context *context, const heif_image *image, heif_encoder *encoder, const heif_encoding_options *options, heif_image_handle **out_image_handle);
+    heif_error (*heif_context_encode_thumbnail)(heif_context *context, const heif_image *image, const heif_image_handle *master_image_handle, heif_encoder *encoder, const heif_encoding_options *options, int bbox_size, heif_image_handle **out_thumb_image_handle);
+    heif_error (*heif_context_write_to_file)(heif_context *context, const char *filename);
     int (*heif_image_get_width)(const heif_image *img, enum heif_channel channel);
     int (*heif_image_get_height)(const heif_image *img, enum heif_channel channel);
     const uint8_t *(*heif_image_get_plane_readonly)(const heif_image *img, enum heif_channel channel, int *out_stride);
@@ -101,6 +110,15 @@ static int iv_heif_load_inner(void) {
     IV_HEIF_LOAD_SYMBOL(heif_image_handle_get_list_of_thumbnail_IDs);
     IV_HEIF_LOAD_SYMBOL(heif_image_handle_get_thumbnail);
     IV_HEIF_LOAD_SYMBOL(heif_decode_image);
+    IV_HEIF_LOAD_SYMBOL(heif_context_get_encoder_for_format);
+    IV_HEIF_LOAD_SYMBOL(heif_encoder_release);
+    IV_HEIF_LOAD_SYMBOL(heif_encoder_set_lossy_quality);
+    IV_HEIF_LOAD_SYMBOL(heif_image_create);
+    IV_HEIF_LOAD_SYMBOL(heif_image_add_plane);
+    IV_HEIF_LOAD_SYMBOL(heif_image_get_plane);
+    IV_HEIF_LOAD_SYMBOL(heif_context_encode_image);
+    IV_HEIF_LOAD_SYMBOL(heif_context_encode_thumbnail);
+    IV_HEIF_LOAD_SYMBOL(heif_context_write_to_file);
     IV_HEIF_LOAD_SYMBOL(heif_image_get_width);
     IV_HEIF_LOAD_SYMBOL(heif_image_get_height);
     IV_HEIF_LOAD_SYMBOL(heif_image_get_plane_readonly);
@@ -276,6 +294,94 @@ int iv_heif_decode_memory(const void *data, size_t len, int thumbnail_only, unsi
     }
 
     int ret = iv_heif_decode_context(ctx, thumbnail_only, out_data, out_width, out_height, err, err_len);
+    g_heif.heif_context_free(ctx);
+    return ret;
+}
+
+static int iv_heif_copy_rgb_to_image(heif_image *image, const unsigned char *rgb, int width, int height, char *err, int err_len) {
+    enum heif_channel channels[3] = {heif_channel_R, heif_channel_G, heif_channel_B};
+    for (int channel_index = 0; channel_index < 3; channel_index++) {
+        int stride = 0;
+        uint8_t *dst = g_heif.heif_image_get_plane(image, channels[channel_index], &stride);
+        if (!dst || stride < width) {
+            if (err && err_len > 0) snprintf(err, (size_t)err_len, "libheif returned invalid encode plane");
+            return -1;
+        }
+
+        for (int y = 0; y < height; y++) {
+            uint8_t *row = dst + (size_t)y * (size_t)stride;
+            const unsigned char *src = rgb + (size_t)y * (size_t)width * 3;
+            for (int x = 0; x < width; x++) {
+                row[x] = src[x * 3 + channel_index];
+            }
+        }
+    }
+    return 0;
+}
+
+int iv_heif_encode_av1_rgb_file(const char *path, const unsigned char *rgb, int width, int height, int quality, int thumb_quality, int thumb_size, char *err, int err_len) {
+    if (err && err_len > 0) err[0] = '\0';
+    if (!path || !rgb || width <= 0 || height <= 0) return -1;
+
+    if (iv_heif_load() != 0) {
+        if (err && err_len > 0) snprintf(err, (size_t)err_len, "%s", g_heif.error);
+        return -1;
+    }
+
+    heif_context *ctx = g_heif.heif_context_alloc();
+    if (!ctx) {
+        if (err && err_len > 0) snprintf(err, (size_t)err_len, "failed to allocate libheif context");
+        return -1;
+    }
+
+    heif_image *image = NULL;
+    heif_image_handle *handle = NULL;
+    heif_image_handle *thumb_handle = NULL;
+    heif_encoder *encoder = NULL;
+    heif_encoder *thumb_encoder = NULL;
+    int ret = -1;
+
+    heif_error heif_err = g_heif.heif_image_create(width, height, heif_colorspace_RGB, heif_chroma_444, &image);
+    if (heif_err.code != heif_error_Ok) goto fail;
+
+    heif_err = g_heif.heif_image_add_plane(image, heif_channel_R, width, height, 8);
+    if (heif_err.code != heif_error_Ok) goto fail;
+    heif_err = g_heif.heif_image_add_plane(image, heif_channel_G, width, height, 8);
+    if (heif_err.code != heif_error_Ok) goto fail;
+    heif_err = g_heif.heif_image_add_plane(image, heif_channel_B, width, height, 8);
+    if (heif_err.code != heif_error_Ok) goto fail;
+
+    if (iv_heif_copy_rgb_to_image(image, rgb, width, height, err, err_len) != 0) goto cleanup;
+
+    heif_err = g_heif.heif_context_get_encoder_for_format(ctx, heif_compression_AV1, &encoder);
+    if (heif_err.code != heif_error_Ok) goto fail;
+    heif_err = g_heif.heif_encoder_set_lossy_quality(encoder, quality);
+    if (heif_err.code != heif_error_Ok) goto fail;
+    heif_err = g_heif.heif_context_encode_image(ctx, image, encoder, NULL, &handle);
+    if (heif_err.code != heif_error_Ok) goto fail;
+
+    heif_err = g_heif.heif_context_get_encoder_for_format(ctx, heif_compression_AV1, &thumb_encoder);
+    if (heif_err.code != heif_error_Ok) goto fail;
+    heif_err = g_heif.heif_encoder_set_lossy_quality(thumb_encoder, thumb_quality);
+    if (heif_err.code != heif_error_Ok) goto fail;
+    heif_err = g_heif.heif_context_encode_thumbnail(ctx, image, handle, thumb_encoder, NULL, thumb_size, &thumb_handle);
+    if (heif_err.code != heif_error_Ok) goto fail;
+
+    heif_err = g_heif.heif_context_write_to_file(ctx, path);
+    if (heif_err.code != heif_error_Ok) goto fail;
+
+    ret = 0;
+    goto cleanup;
+
+fail:
+    iv_heif_fail(heif_err, err, err_len);
+
+cleanup:
+    if (thumb_handle) g_heif.heif_image_handle_release(thumb_handle);
+    if (handle) g_heif.heif_image_handle_release(handle);
+    if (thumb_encoder) g_heif.heif_encoder_release(thumb_encoder);
+    if (encoder) g_heif.heif_encoder_release(encoder);
+    if (image) g_heif.heif_image_release(image);
     g_heif.heif_context_free(ctx);
     return ret;
 }

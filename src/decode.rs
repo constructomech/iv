@@ -1516,6 +1516,50 @@ pub fn decode_heif_from_bytes(data: &[u8]) -> Option<DecodedImage> {
     decoded_heif_from_parts(out_data, width, height)
 }
 
+/// Encode an RGB image as AV1 HEIC with an embedded thumbnail through dynamic libheif.
+pub fn encode_heif_av1_rgb_file(
+    path: &Path,
+    rgb: &[u8],
+    width: u32,
+    height: u32,
+    quality: i32,
+    thumb_quality: i32,
+    thumb_size: i32,
+) -> Result<(), String> {
+    if rgb.len() != width as usize * height as usize * 3 {
+        return Err("RGB buffer size does not match dimensions".to_string());
+    }
+    let path_str = path
+        .to_str()
+        .ok_or_else(|| format!("HEIC output path is not valid UTF-8: {}", path.display()))?;
+    let path = CString::new(path_str)
+        .map_err(|_| "HEIC output path contains an interior NUL".to_string())?;
+    let mut error = [0 as c_char; 512];
+    let ret = unsafe {
+        iv_heif_encode_av1_rgb_file(
+            path.as_ptr(),
+            rgb.as_ptr(),
+            width as c_int,
+            height as c_int,
+            quality as c_int,
+            thumb_quality as c_int,
+            thumb_size as c_int,
+            error.as_mut_ptr(),
+            error.len() as c_int,
+        )
+    };
+    if ret == 0 {
+        Ok(())
+    } else {
+        let message = heif_error_message(&error);
+        Err(if message.is_empty() {
+            format!("HEIC encode failed with code {ret}")
+        } else {
+            message
+        })
+    }
+}
+
 #[link(name = "iv_heif", kind = "static")]
 unsafe extern "C" {
     fn iv_heif_decode_file(
@@ -1535,6 +1579,18 @@ unsafe extern "C" {
         out_data: *mut *mut u8,
         out_width: *mut c_int,
         out_height: *mut c_int,
+        err: *mut c_char,
+        err_len: c_int,
+    ) -> c_int;
+
+    fn iv_heif_encode_av1_rgb_file(
+        path: *const c_char,
+        rgb: *const u8,
+        width: c_int,
+        height: c_int,
+        quality: c_int,
+        thumb_quality: c_int,
+        thumb_size: c_int,
         err: *mut c_char,
         err_len: c_int,
     ) -> c_int;

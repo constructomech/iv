@@ -126,9 +126,6 @@ fn main() {
             files.push((r.clone(), "RAW"));
         }
     }
-    // HEIC is still benchmarked when an existing generated/cached file is
-    // present, but this example no longer creates one because the main app no
-    // longer carries libheif-rs encoding dependencies.
     for name in [
         "jpeg.jpg",
         "tiff.tiff",
@@ -201,6 +198,9 @@ fn generate_formats(dir: &Path, rgb: &RgbImage, rgba: &RgbaImage) {
         rgba.save_with_format(dir.join("webp.webp"), ImageFormat::WebP)
             .unwrap();
     });
+    encode_step("  HEIC (AV1 q50+thumb)", || {
+        encode_heic(dir, rgb, "heic.heic");
+    });
     encode_step("  GIF (256-color)", || {
         rgba.save_with_format(dir.join("gif.gif"), ImageFormat::Gif)
             .unwrap();
@@ -265,6 +265,19 @@ fn build_app1(thumb: &[u8]) -> Vec<u8> {
     a.extend_from_slice(b"Exif\0\0");
     a.extend_from_slice(&t);
     a
+}
+
+fn encode_heic(dir: &Path, src: &RgbImage, name: &str) {
+    iv::encode_heif_av1_rgb_file(
+        dir.join(name).as_path(),
+        src.as_raw(),
+        src.width(),
+        src.height(),
+        50,
+        40,
+        320,
+    )
+    .unwrap();
 }
 
 fn rgba_to_rgb(rgba: &[u8]) -> Vec<u8> {

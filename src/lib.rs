@@ -17,10 +17,10 @@ pub use app::{DecodedImage, load_image};
 pub use decode::{
     DecodeTimings, ExifMetadata, ProbeResult, decode_for_upscale, decode_from_bytes,
     decode_raw_libraw, decode_thumbnail, decode_thumbnail_progressive, decode_video_thumbnail,
-    extract_exif_thumbnail, is_heif_extension, is_raw_extension, load_raw_preview, needs_upscale,
-    probe_embedded_thumbnail, read_date_taken, read_date_taken_from_path, read_exif_metadata,
-    read_exif_metadata_from_path, try_embedded_from_bytes, try_exif_only, try_heif_thumbnail,
-    try_heif_thumbnail_from_bytes,
+    encode_heif_av1_rgb_file, extract_exif_thumbnail, is_heif_extension, is_raw_extension,
+    load_raw_preview, needs_upscale, probe_embedded_thumbnail, read_date_taken,
+    read_date_taken_from_path, read_exif_metadata, read_exif_metadata_from_path,
+    try_embedded_from_bytes, try_exif_only, try_heif_thumbnail, try_heif_thumbnail_from_bytes,
 };
 pub use develop::{
     XmpDevelopSetting, XmpDevelopSettings, XmpDevelopSource, apply_xmp_develop_settings,

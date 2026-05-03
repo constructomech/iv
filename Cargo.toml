@@ -16,6 +16,10 @@ license = "MIT"
 name = "iv"
 path = "src/main.rs"
 
+[[bin]]
+name = "lint-i18n"
+path = "tools/lint_i18n.rs"
+
 [dependencies]
 eframe = "0.31"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp", "tiff", "bmp"] }
