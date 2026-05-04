@@ -29,6 +29,7 @@ fn debug_mode() -> bool {
 /// Per-frame time budget for scheduling + result polling (ms).
 /// Keeps the UI thread responsive at 60fps (~16ms frame budget).
 const FRAME_WORK_BUDGET_MS: f64 = 4.0;
+const MAX_RESULTS_PER_FRAME: usize = 32;
 /// Thumbnail decode resolution (pixels).
 const THUMB_SIZE: u32 = 160;
 
@@ -488,6 +489,9 @@ impl GridView {
     fn poll_results(&mut self, ctx: &egui::Context, deadline: &std::time::Instant) -> usize {
         let mut processed = 0;
         loop {
+            if processed >= MAX_RESULTS_PER_FRAME {
+                break;
+            }
             if std::time::Instant::now() >= *deadline {
                 break;
             }
