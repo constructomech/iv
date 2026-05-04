@@ -271,7 +271,7 @@ impl GridView {
 
         // Decode workers: CPU-bound, matched to available cores.
         let num_decoders = std::thread::available_parallelism()
-            .map(|n| n.get().saturating_sub(2).max(2))
+            .map(|n| n.get().saturating_sub(1).max(4))
             .unwrap_or(4);
 
         let mut decode_workers = Vec::with_capacity(num_decoders);
