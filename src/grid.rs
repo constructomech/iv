@@ -359,6 +359,31 @@ impl Grid {
         }
         let vr = self.visible_rows();
         let config = self.config.clone();
+        if let Some(GridEvent {
+            kind:
+                GridEventKind::ViewportSnapshot {
+                    width,
+                    height,
+                    scroll_y,
+                    visible_first,
+                    visible_last,
+                    tile_width,
+                    tile_height,
+                    padding,
+                },
+            ..
+        }) = self.log.last()
+            && *width == self.viewport.width
+            && *height == self.viewport.height
+            && *scroll_y == self.viewport.scroll_y
+            && *visible_first == vr.first
+            && *visible_last == vr.last
+            && *tile_width == config.tile_width
+            && *tile_height == config.tile_height
+            && *padding == config.padding
+        {
+            return;
+        }
         self.record(GridEventKind::ViewportSnapshot {
             width: self.viewport.width,
             height: self.viewport.height,
