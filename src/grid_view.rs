@@ -1102,19 +1102,10 @@ impl GridView {
                     continue;
                 }
 
-                let row_tiles: Vec<(usize, usize)> = self
-                    .grid
-                    .display_order()
-                    .iter()
-                    .enumerate()
-                    .take(disp_end)
-                    .skip(disp_start)
-                    .map(|(pos, &idx)| (pos, idx))
-                    .collect();
-
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing = egui::vec2(padding, 0.0);
-                    for (pos, idx) in row_tiles {
+                    for pos in disp_start..disp_end {
+                        let idx = self.grid.display_to_tile(pos);
                         let state = self.grid.tile_state(idx);
                         let name = self.grid.tile_name(idx);
                         let is_video = media::is_video_file(self.grid.tile_path(idx));
