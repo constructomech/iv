@@ -1009,6 +1009,9 @@ impl GridView {
         let keyboard_scroll_y = self.handle_keyboard_navigation(ctx);
         let poll_start = std::time::Instant::now();
         let results_processed = self.poll_results(ctx, &deadline);
+        if results_processed > 0 {
+            ctx.request_repaint();
+        }
         let results_pending = self.result_rx.len();
         let poll_ms = poll_start.elapsed().as_secs_f64() * 1000.0;
 
