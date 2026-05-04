@@ -68,6 +68,12 @@ All methods that return visible tile information (`visible_in_state()`,
 `display_order`, so scheduling and rendering automatically respect the
 current sort.
 
+The activity log can also record benchmark-generation events. `GridView` emits
+viewport snapshots after layout, decode-ready events after a worker result has
+been uploaded as an egui texture, and first-textured-paint events the first time
+a textured tile is rendered while visible. These timestamps let load benchmarks
+measure user-visible blank tile time instead of only worker decode time.
+
 ### Layout Math
 
 All layout is computed from three values:
@@ -183,6 +189,16 @@ tracks in-flight scans to prevent duplicates.
 This ensures every visible tile shows *something* (even a low-res embedded
 thumbnail) before any expensive full decodes begin, and tiles that appear
 blurry at large tile sizes get silently upgraded in the background.
+
+## Load Replay Benchmark
+
+The `iv-load-bench` tool consumes versioned fixture JSON described by
+`src/load_bench.rs`. Fixtures are intended to be generated from interactive
+activity logs and contain display-order tiles, grid sizing, sort mode, and a
+viewport timeline. The runner currently validates the schema and computes the
+initial weighted blank tile milliseconds score scaffold. Future replay work
+should reuse the production scheduling rules above so benchmark behavior stays
+aligned with the UI rather than drifting into a separate approximation.
 
 ## Worker Threading Model
 

@@ -1846,6 +1846,8 @@ dependencies = [
  "log",
  "open",
  "rust-i18n",
+ "serde",
+ "serde_json",
  "tempfile",
  "tokio",
  "zune-core",

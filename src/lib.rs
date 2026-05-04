@@ -11,6 +11,7 @@ pub mod grid;
 mod grid_view;
 mod image_view;
 mod launcher;
+pub mod load_bench;
 pub mod media;
 
 pub use app::{DecodedImage, load_image};

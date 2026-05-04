@@ -234,6 +234,8 @@ pub struct GridView {
     date_scanning: std::collections::HashSet<usize>,
     /// Per-tile timing data for debug overlay.
     timings: Vec<TileTiming>,
+    /// Whether a textured tile has been painted at least once while visible.
+    painted_once: Vec<bool>,
     /// Cached file bytes from HEIC embedded extraction (avoids re-read for full decode).
     cached_data: Vec<Option<Vec<u8>>>,
     /// Tokio runtime for async I/O (file reads).
@@ -411,6 +413,7 @@ impl GridView {
             upgrading: std::collections::HashSet::new(),
             date_scanning: std::collections::HashSet::new(),
             timings: Vec::new(),
+            painted_once: Vec::new(),
             cached_data: Vec::new(),
             io_runtime,
             decode_tx,
@@ -454,6 +457,7 @@ impl GridView {
         self.upgrading.clear();
         self.date_scanning.clear();
         self.timings.clear();
+        self.painted_once.clear();
         self.cached_data.clear();
         self.last_scroll_y = 0.0;
         self.grid.record_event(GridEventKind::GenerationBump {
@@ -472,6 +476,9 @@ impl GridView {
         }
         while self.timings.len() <= idx {
             self.timings.push(TileTiming::default());
+        }
+        while self.painted_once.len() <= idx {
+            self.painted_once.push(false);
         }
         while self.cached_data.len() <= idx {
             self.cached_data.push(None);
@@ -512,6 +519,10 @@ impl GridView {
                             kind: "embedded_ok".into(),
                             ms,
                         });
+                        self.grid.record_event(GridEventKind::DecodeReady {
+                            idx,
+                            kind: "embedded_ok".into(),
+                        });
                         self.grid.set_tile_state(idx, TileState::Loaded);
                     }
                 }
@@ -547,6 +558,10 @@ impl GridView {
                             kind: "full_ok".into(),
                             ms,
                         });
+                        self.grid.record_event(GridEventKind::DecodeReady {
+                            idx,
+                            kind: "full_ok".into(),
+                        });
                         self.grid.set_tile_state(idx, TileState::Loaded);
                     }
                 }
@@ -578,6 +593,10 @@ impl GridView {
                             idx,
                             kind: "upscale_ok".into(),
                             ms,
+                        });
+                        self.grid.record_event(GridEventKind::DecodeReady {
+                            idx,
+                            kind: "upscale_ok".into(),
                         });
                     }
                 }
@@ -1021,6 +1040,7 @@ impl GridView {
                 .set_viewport_size(available_width, ui.clip_rect().height());
             let scroll_offset = ui.clip_rect().min.y - ui.min_rect().min.y;
             self.grid.set_scroll(scroll_offset);
+            self.grid.record_viewport_snapshot();
 
             self.check_scroll_generation();
             self.schedule_work(&deadline);
@@ -1042,8 +1062,6 @@ impl GridView {
             let debug = self.debug;
             let sep_row = self.grid.separator_row();
             let sorted_count = self.grid.sorted_count();
-            let display_order = self.grid.display_order();
-
             for row in render_first..render_last {
                 // Check if this is the separator row
                 if sep_row == Some(row) {
@@ -1084,18 +1102,24 @@ impl GridView {
                     continue;
                 }
 
+                let row_tiles: Vec<(usize, usize)> = self
+                    .grid
+                    .display_order()
+                    .iter()
+                    .enumerate()
+                    .take(disp_end)
+                    .skip(disp_start)
+                    .map(|(pos, &idx)| (pos, idx))
+                    .collect();
+
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing = egui::vec2(padding, 0.0);
-                    for (pos, &idx) in display_order
-                        .iter()
-                        .enumerate()
-                        .take(disp_end)
-                        .skip(disp_start)
-                    {
+                    for (pos, idx) in row_tiles {
                         let state = self.grid.tile_state(idx);
                         let name = self.grid.tile_name(idx);
                         let is_video = media::is_video_file(self.grid.tile_path(idx));
                         let is_live_photo = self.grid.tile_live_video(idx).is_some();
+                        let has_texture = self.textures.get(idx).is_some_and(|t| t.is_some());
                         let texture = self.textures.get(idx).and_then(|t| t.as_ref());
                         let timing = self.timings.get(idx);
                         let response = Self::render_tile(
@@ -1113,6 +1137,18 @@ impl GridView {
                         );
                         if response.clicked() {
                             clicked = Some(pos);
+                        }
+                        if self.grid.logging_enabled()
+                            && has_texture
+                            && !self.painted_once.get(idx).copied().unwrap_or(false)
+                        {
+                            self.ensure_vecs(idx);
+                            self.painted_once[idx] = true;
+                            self.grid.record_event(GridEventKind::FirstTexturedPaint {
+                                idx,
+                                display_pos: pos,
+                                visible_fraction: self.grid.visible_fraction_for_display_pos(pos),
+                            });
                         }
                     }
                 });

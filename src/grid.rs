@@ -132,6 +132,17 @@ pub enum GridEventKind {
         visible_first: usize,
         visible_last: usize,
     },
+    /// Full viewport snapshot for replay benchmark generation.
+    ViewportSnapshot {
+        width: f32,
+        height: f32,
+        scroll_y: f32,
+        visible_first: usize,
+        visible_last: usize,
+        tile_width: f32,
+        tile_height: f32,
+        padding: f32,
+    },
     /// Tile state changed.
     StateChange {
         idx: usize,
@@ -142,6 +153,14 @@ pub enum GridEventKind {
     WorkScheduled { indices: Vec<usize>, tier: String },
     /// A result was received from a worker.
     ResultReceived { idx: usize, kind: String, ms: f64 },
+    /// A decoded result has become a GPU texture on the UI thread.
+    DecodeReady { idx: usize, kind: String },
+    /// A tile with a texture was painted while visible for the first time.
+    FirstTexturedPaint {
+        idx: usize,
+        display_pos: usize,
+        visible_fraction: f32,
+    },
     /// Generation bumped (stale work invalidated).
     GenerationBump { generation: u64 },
     /// Frame timing: how long the UI frame took.
@@ -211,6 +230,10 @@ impl Grid {
         self.logging = true;
     }
 
+    pub fn logging_enabled(&self) -> bool {
+        self.logging
+    }
+
     /// Get the activity log.
     pub fn log(&self) -> &[GridEvent] {
         &self.log
@@ -245,6 +268,20 @@ impl Grid {
                         r#"{{"type":"scrolled","scroll_y":{scroll_y:.1},"visible_first":{visible_first},"visible_last":{visible_last}}}"#
                     )
                 }
+                GridEventKind::ViewportSnapshot {
+                    width,
+                    height,
+                    scroll_y,
+                    visible_first,
+                    visible_last,
+                    tile_width,
+                    tile_height,
+                    padding,
+                } => {
+                    format!(
+                        r#"{{"type":"viewport","width":{width:.1},"height":{height:.1},"scroll_y":{scroll_y:.1},"visible_first":{visible_first},"visible_last":{visible_last},"tile_width":{tile_width:.1},"tile_height":{tile_height:.1},"padding":{padding:.1}}}"#
+                    )
+                }
                 GridEventKind::StateChange { idx, from, to } => {
                     format!(r#"{{"type":"state_change","idx":{idx},"from":"{from}","to":"{to}"}}"#)
                 }
@@ -258,6 +295,18 @@ impl Grid {
                 }
                 GridEventKind::ResultReceived { idx, kind, ms } => {
                     format!(r#"{{"type":"result","idx":{idx},"kind":"{kind}","ms":{ms:.2}}}"#)
+                }
+                GridEventKind::DecodeReady { idx, kind } => {
+                    format!(r#"{{"type":"decode_ready","idx":{idx},"kind":"{kind}"}}"#)
+                }
+                GridEventKind::FirstTexturedPaint {
+                    idx,
+                    display_pos,
+                    visible_fraction,
+                } => {
+                    format!(
+                        r#"{{"type":"first_textured_paint","idx":{idx},"display_pos":{display_pos},"visible_fraction":{visible_fraction:.3}}}"#
+                    )
                 }
                 GridEventKind::GenerationBump { generation } => {
                     format!(r#"{{"type":"generation_bump","generation":{generation}}}"#)
@@ -302,6 +351,53 @@ impl Grid {
     /// Record an external event (e.g., from GridView scheduling).
     pub fn record_event(&mut self, kind: GridEventKind) {
         self.record(kind);
+    }
+
+    pub fn record_viewport_snapshot(&mut self) {
+        if !self.logging {
+            return;
+        }
+        let vr = self.visible_rows();
+        let config = self.config.clone();
+        self.record(GridEventKind::ViewportSnapshot {
+            width: self.viewport.width,
+            height: self.viewport.height,
+            scroll_y: self.viewport.scroll_y,
+            visible_first: vr.first,
+            visible_last: vr.last,
+            tile_width: config.tile_width,
+            tile_height: config.tile_height,
+            padding: config.padding,
+        });
+    }
+
+    pub fn visible_fraction_for_display_pos(&self, display_pos: usize) -> f32 {
+        let cols = self.cols();
+        if cols == 0 {
+            return 0.0;
+        }
+        let Some(row) = self.display_pos_to_row(display_pos) else {
+            return 0.0;
+        };
+        let cell_top = row as f32 * self.config.cell_height();
+        let cell_bottom = cell_top + self.config.tile_height;
+        let viewport_top = self.viewport.scroll_y;
+        let viewport_bottom = viewport_top + self.viewport.height;
+        let visible = cell_bottom.min(viewport_bottom) - cell_top.max(viewport_top);
+        (visible / self.config.tile_height).clamp(0.0, 1.0)
+    }
+
+    fn display_pos_to_row(&self, display_pos: usize) -> Option<usize> {
+        let cols = self.cols();
+        if cols == 0 || display_pos >= self.display_order.len() {
+            return None;
+        }
+        match self.separator_row() {
+            Some(sep) if display_pos >= self.sorted_count => {
+                Some(sep + 1 + (display_pos - self.sorted_count) / cols)
+            }
+            _ => Some(display_pos / cols),
+        }
     }
 
     // -- Tile management ---------------------------------------------------
@@ -1388,6 +1484,16 @@ mod tests {
         for idx in 14..21 {
             assert!(!need_work.contains(&idx));
         }
+    }
+
+    #[test]
+    fn visible_fraction_accounts_for_partial_rows() {
+        let mut g = make_grid(20);
+        g.set_viewport_size(500.0, 252.0);
+        g.set_scroll(84.0);
+
+        assert!((g.visible_fraction_for_display_pos(0) - 0.475).abs() < 0.001);
+        assert_eq!(g.visible_fraction_for_display_pos(3), 1.0);
     }
 
     // -- State machine correctness -----------------------------------------

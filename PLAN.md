@@ -189,6 +189,23 @@
   - Async background writer, never blocks the UI
 - **Exit criterion:** Published benchmark numbers. Cache decision made with data.
 
+#### Directory Load Replay Benchmark
+
+- Produce benchmark fixture files from interactive `--log` runs by post-processing the activity log.
+- Fixture schema is versioned and stores:
+  - enumerated files in display order, including path, media kind, sort data, and Live Photo pairing
+  - grid configuration: tile size, padding, viewport size, sort mode
+  - viewport timeline: scroll position and viewport size over time
+  - observed UI latency from `decode_ready` to first textured paint while visible
+- Replay fixtures headlessly against the real files, without re-running enumeration, so local and network paths are repeatable.
+- Refactor scheduling so the UI and replay benchmark share the same scheduling decisions.
+- Primary score: weighted blank visible tile milliseconds, where each interval contributes `duration_ms * visible_fraction` until a tile first has a painted texture.
+- Secondary metrics: time to first visible texture, time until the viewport is fully nonblank, decode-ready latency, texture/render latency, failures, and per-tier I/O/decode timings.
+- Benchmark runner command target: `iv-load-bench <fixture.json>`.
+- Baseline capture: `C:\Users\mikeo\AppData\Local\Temp\iv_grid_log.json`, directory `U:\photos\2025\12`, captured 2026-05-03 22:25:31 -07:00 with `target\release\iv.exe --log U:\photos\2025\12`.
+- Baseline score command: `target\release\iv-load-bench.exe C:\Users\mikeo\AppData\Local\Temp\iv_grid_log.json`.
+- Baseline score: 9121.7 weighted blank tile ms; first visible texture 309.6 ms; fully nonblank 15522.4 ms; 1778 viewport samples.
+
 ### Phase 9 — Video Thumbnail Support
 **Goal:** Show thumbnails for common video files without adding full video playback.
 
