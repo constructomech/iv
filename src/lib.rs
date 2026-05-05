@@ -29,6 +29,7 @@ pub use develop::{
 };
 pub use enumerator::{EnumHandle, EnumMessage, enumerate_folder};
 pub use grid::{Grid, GridConfig, GridEvent, GridEventKind, SortMode, TileState, VisibleRows};
+pub use grid_view::thumbnail_decode_worker_count;
 pub use media::{
     IMAGE_EXTENSIONS, MediaKind, VIDEO_EXTENSIONS, is_image_file, is_media_file, is_video_file,
     media_kind_for_path,

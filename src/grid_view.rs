@@ -33,6 +33,12 @@ const MAX_RESULTS_PER_FRAME: usize = 32;
 /// Thumbnail decode resolution (pixels).
 const THUMB_SIZE: u32 = 160;
 
+pub fn thumbnail_decode_worker_count() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get().saturating_sub(1).max(4))
+        .unwrap_or(4)
+}
+
 /// Probe read size — 64KB covers HEIC meta box + thumbnail data for most
 /// camera originals, JPEG APP1 with embedded thumbnail, PNG chunk headers
 /// before IDAT, and WebP VP8X + initial chunk scan.
@@ -270,9 +276,7 @@ impl GridView {
             .expect("failed to create tokio runtime");
 
         // Decode workers: CPU-bound, matched to available cores.
-        let num_decoders = std::thread::available_parallelism()
-            .map(|n| n.get().saturating_sub(1).max(4))
-            .unwrap_or(4);
+        let num_decoders = thumbnail_decode_worker_count();
 
         let mut decode_workers = Vec::with_capacity(num_decoders);
         for _ in 0..num_decoders {
