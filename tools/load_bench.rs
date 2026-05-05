@@ -230,6 +230,7 @@ struct DirectoryRunScore {
 struct BenchResult {
     started: Instant,
     ok: bool,
+    path: PathBuf,
 }
 
 fn run_directory_once(files: &[PathBuf]) -> DirectoryRunScore {
@@ -247,10 +248,12 @@ fn run_directory_once(files: &[PathBuf]) -> DirectoryRunScore {
     let mut first_ms = None;
     let mut full_ms: f64 = 0.0;
     let mut failures = 0usize;
+    let mut failed_paths = Vec::new();
     for _ in 0..files.len() {
         let result = result_rx.recv().unwrap();
         if !result.ok {
             failures += 1;
+            failed_paths.push(result.path);
         }
         let elapsed = result.started.duration_since(start).as_secs_f64() * 1000.0;
         first_ms.get_or_insert(elapsed);
@@ -258,6 +261,12 @@ fn run_directory_once(files: &[PathBuf]) -> DirectoryRunScore {
     }
     for worker in workers {
         worker.join().unwrap();
+    }
+
+    if std::env::var("IV_LOAD_BENCH_PRINT_FAILURES").is_ok() {
+        for path in &failed_paths {
+            eprintln!("failed: {}", path.display());
+        }
     }
 
     DirectoryRunScore {
@@ -281,7 +290,7 @@ fn spawn_decode_workers(
                 while let Ok(path) = work_rx.recv() {
                     let started = Instant::now();
                     let ok = decode_thumbnail_like_grid(&path).is_ok();
-                    let _ = result_tx.send(BenchResult { started, ok });
+                    let _ = result_tx.send(BenchResult { started, ok, path });
                 }
             })
         })
@@ -314,6 +323,12 @@ fn collect_media_files(path: &Path, limit: Option<usize>) -> Vec<PathBuf> {
         .filter_map(Result::ok)
         .filter(|entry| entry.file_type().is_ok_and(|file_type| file_type.is_file()))
         .map(|entry| entry.path())
+        .filter(|path| {
+            !path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with('.'))
+        })
         .filter(|path| iv::is_media_file(path))
         .collect::<Vec<_>>();
     files.sort_by(|a, b| {

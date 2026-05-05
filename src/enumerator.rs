@@ -60,7 +60,13 @@ fn enumerate_inner(folder: &Path, tx: &mpsc::Sender<EnumMessage>) {
         };
 
         let path = entry.path();
-
+        if path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with('.'))
+        {
+            continue;
+        }
         // Use file_type() from the directory entry (no extra stat syscall)
         let is_file = entry.file_type().is_ok_and(|ft| ft.is_file());
         if !is_file {
