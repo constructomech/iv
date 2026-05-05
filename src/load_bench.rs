@@ -161,9 +161,20 @@ pub fn score_activity_log(entries: &[GridActivityLogEntry]) -> LoadBenchScore {
         }
     }
 
-    let mut previous = None;
+    let mut current_viewport = None;
+    let mut previous_time_us = None;
     let mut saw_visible_viewport = false;
     for entry in entries {
+        if let (Some(viewport), Some(previous_time_us)) = (&current_viewport, previous_time_us) {
+            add_activity_interval_score(
+                &mut score,
+                viewport,
+                previous_time_us,
+                entry.time_us,
+                &first_paint_times,
+            );
+        }
+
         let GridActivityLogEvent::Viewport {
             width,
             height,
@@ -175,6 +186,7 @@ pub fn score_activity_log(entries: &[GridActivityLogEntry]) -> LoadBenchScore {
             padding,
         } = entry.event
         else {
+            previous_time_us = Some(entry.time_us);
             continue;
         };
         if visible_first < visible_last {
@@ -191,10 +203,8 @@ pub fn score_activity_log(entries: &[GridActivityLogEntry]) -> LoadBenchScore {
             tile_height,
             padding,
         };
-        if let Some(prev) = &previous {
-            add_activity_interval_score(&mut score, prev, &viewport, &first_paint_times);
-        }
-        previous = Some(viewport);
+        current_viewport = Some(viewport);
+        previous_time_us = Some(entry.time_us);
     }
 
     score.first_visible_texture_ms = entries
@@ -226,23 +236,27 @@ struct ActivityViewport {
 
 fn add_activity_interval_score(
     score: &mut LoadBenchScore,
-    previous: &ActivityViewport,
-    next: &ActivityViewport,
+    viewport: &ActivityViewport,
+    start_time_us: u64,
+    end_time_us: u64,
     first_paint_times: &[Option<u64>],
 ) {
-    for display_pos in previous.visible_first..previous.visible_last {
-        let visible_fraction = activity_visible_fraction(previous, display_pos);
+    if end_time_us <= start_time_us {
+        return;
+    }
+    for display_pos in viewport.visible_first..viewport.visible_last {
+        let visible_fraction = activity_visible_fraction(viewport, display_pos);
         if visible_fraction <= 0.0 {
             continue;
         }
         let first_paint_us = first_paint_times.get(display_pos).and_then(|time| *time);
-        if first_paint_us.is_some_and(|time| time <= previous.time_us) {
+        if first_paint_us.is_some_and(|time| time <= start_time_us) {
             continue;
         }
         let blank_until_us = first_paint_us
-            .map(|time| time.min(next.time_us))
-            .unwrap_or(next.time_us);
-        let duration_ms = blank_until_us.saturating_sub(previous.time_us) as f64 / 1000.0;
+            .map(|time| time.min(end_time_us))
+            .unwrap_or(end_time_us);
+        let duration_ms = blank_until_us.saturating_sub(start_time_us) as f64 / 1000.0;
         score.weighted_blank_ms += duration_ms * visible_fraction as f64;
     }
 }
@@ -477,6 +491,39 @@ mod tests {
         assert_eq!(score.weighted_blank_ms, 12.0);
         assert_eq!(score.first_visible_texture_ms, Some(12.0));
         assert_eq!(score.fully_nonblank_ms, Some(12.0));
+    }
+
+    #[test]
+    fn activity_log_scores_between_non_viewport_events() {
+        let entries = vec![
+            GridActivityLogEntry {
+                time_us: 0,
+                event: GridActivityLogEvent::Viewport {
+                    width: 600.0,
+                    height: 300.0,
+                    scroll_y: 0.0,
+                    visible_first: 0,
+                    visible_last: 1,
+                    tile_width: 275.0,
+                    tile_height: 275.0,
+                    padding: 8.0,
+                },
+            },
+            GridActivityLogEntry {
+                time_us: 10_000,
+                event: GridActivityLogEvent::Other,
+            },
+            GridActivityLogEntry {
+                time_us: 20_000,
+                event: GridActivityLogEvent::FirstTexturedPaint {
+                    idx: 42,
+                    display_pos: 0,
+                    visible_fraction: 1.0,
+                },
+            },
+        ];
+
+        assert_eq!(score_activity_log(&entries).weighted_blank_ms, 20.0);
     }
 
     #[test]
