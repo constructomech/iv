@@ -239,6 +239,8 @@ pub struct GridView {
     upgrading: std::collections::HashSet<usize>,
     /// Indices of tiles with in-flight date scans.
     date_scanning: std::collections::HashSet<usize>,
+    /// Indices of video tiles with in-flight thumbnail extraction.
+    video_scanning: std::collections::HashSet<usize>,
     /// Per-tile timing data for debug overlay.
     timings: Vec<TileTiming>,
     /// Whether a textured tile has been painted at least once while visible.
@@ -417,6 +419,7 @@ impl GridView {
             decoded_sizes: Vec::new(),
             upgrading: std::collections::HashSet::new(),
             date_scanning: std::collections::HashSet::new(),
+            video_scanning: std::collections::HashSet::new(),
             timings: Vec::new(),
             painted_once: Vec::new(),
             cached_data: Vec::new(),
@@ -461,6 +464,7 @@ impl GridView {
         self.decoded_sizes.clear();
         self.upgrading.clear();
         self.date_scanning.clear();
+        self.video_scanning.clear();
         self.timings.clear();
         self.painted_once.clear();
         self.cached_data.clear();
@@ -552,6 +556,7 @@ impl GridView {
                 WorkResult::FullOk { idx, image, ms, .. } => {
                     if idx < self.grid.tile_count() {
                         self.ensure_vecs(idx);
+                        self.video_scanning.remove(&idx);
                         let size = [image.width as usize, image.height as usize];
                         self.decoded_sizes[idx] = Some((image.width, image.height));
                         let ci = egui::ColorImage::from_rgba_unmultiplied(size, &image.pixels);
@@ -577,6 +582,7 @@ impl GridView {
                     if idx < self.grid.tile_count() {
                         self.ensure_vecs(idx);
                         self.upgrading.remove(&idx);
+                        self.video_scanning.remove(&idx);
                         self.grid.record_event(GridEventKind::ResultReceived {
                             idx,
                             kind: "failed".into(),
@@ -647,6 +653,12 @@ impl GridView {
                 let path = self.grid.tile_path(idx).to_path_buf();
                 if path.as_os_str().is_empty() {
                     continue;
+                }
+                if media::is_video_file(&path) {
+                    if self.video_scanning.contains(&idx) {
+                        continue;
+                    }
+                    self.video_scanning.insert(idx);
                 }
                 let tier = if media::is_video_file(&path) {
                     WorkTier::VideoThumbnail
@@ -976,6 +988,7 @@ impl GridView {
             while self.decode_rx.try_recv().is_ok() {}
             self.upgrading.clear();
             self.date_scanning.clear();
+            self.video_scanning.clear();
             let mut reset_count = 0;
             for idx in 0..self.grid.tile_count() {
                 match self.grid.tile_state(idx) {

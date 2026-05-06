@@ -228,7 +228,7 @@ struct DirectoryRunScore {
 
 #[derive(Debug)]
 struct BenchResult {
-    started: Instant,
+    finished: Instant,
     ok: bool,
     path: PathBuf,
 }
@@ -255,7 +255,7 @@ fn run_directory_once(files: &[PathBuf]) -> DirectoryRunScore {
             failures += 1;
             failed_paths.push(result.path);
         }
-        let elapsed = result.started.duration_since(start).as_secs_f64() * 1000.0;
+        let elapsed = result.finished.duration_since(start).as_secs_f64() * 1000.0;
         first_ms.get_or_insert(elapsed);
         full_ms = full_ms.max(elapsed);
     }
@@ -288,9 +288,12 @@ fn spawn_decode_workers(
             let result_tx = result_tx.clone();
             thread::spawn(move || {
                 while let Ok(path) = work_rx.recv() {
-                    let started = Instant::now();
                     let ok = decode_thumbnail_like_grid(&path).is_ok();
-                    let _ = result_tx.send(BenchResult { started, ok, path });
+                    let _ = result_tx.send(BenchResult {
+                        finished: Instant::now(),
+                        ok,
+                        path,
+                    });
                 }
             })
         })
