@@ -175,7 +175,9 @@ An `upgrading` set tracks in-flight upscale requests to prevent duplicates.
 **Phase 4**: Preload off-screen `NotLoaded` tiles as `EmbeddedOnly`,
 expanding outward from the visible range so nearby tiles load first. Video files
 are intentionally skipped here because frame extraction may launch an external
-decoder and should not compete with image thumbnailing for off-screen work.
+decoder and should not compete with image thumbnailing for off-screen work. The
+scheduler caps off-screen prefetches per frame so speculative thumbnails do not
+flood the decode workers while visible tiles are still becoming user-visible.
 
 **Phase 5**: EXIF date-taken metadata scan (only in `DateTaken` sort mode).
 JPEG-like files use a small prefix read. TIFF/DNG files use a seekable reader
@@ -462,6 +464,8 @@ significant event with microsecond timestamps:
 - `Scrolled` — significant scroll position changes
 - `WorkScheduled` — batch of tiles sent to workers (with tier)
 - `ResultReceived` — worker result (with timing in ms)
+- `WorkAccounting` — per-work I/O/decode timing, stale status, and visibility
+  at completion, used to measure speculative or discarded background work
 - `GenerationBump` — stale work invalidation
 
 On exit, the log is written to `%TEMP%/iv_grid_log.json`. This can be

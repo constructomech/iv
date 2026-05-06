@@ -151,6 +151,15 @@ pub enum GridEventKind {
     },
     /// Work was scheduled (indices + tier description).
     WorkScheduled { indices: Vec<usize>, tier: String },
+    /// Work completed or was discarded, with scheduling relevance details.
+    WorkAccounting {
+        idx: usize,
+        tier: String,
+        io_ms: f64,
+        decode_ms: f64,
+        stale: bool,
+        visible_fraction: f32,
+    },
     /// A result was received from a worker.
     ResultReceived { idx: usize, kind: String, ms: f64 },
     /// A decoded result has become a GPU texture on the UI thread.
@@ -296,6 +305,18 @@ impl Grid {
                 GridEventKind::ResultReceived { idx, kind, ms } => {
                     format!(r#"{{"type":"result","idx":{idx},"kind":"{kind}","ms":{ms:.2}}}"#)
                 }
+                GridEventKind::WorkAccounting {
+                    idx,
+                    tier,
+                    io_ms,
+                    decode_ms,
+                    stale,
+                    visible_fraction,
+                } => {
+                    format!(
+                        r#"{{"type":"work_accounting","idx":{idx},"tier":"{tier}","io_ms":{io_ms:.2},"decode_ms":{decode_ms:.2},"stale":{stale},"visible_fraction":{visible_fraction:.3}}}"#
+                    )
+                }
                 GridEventKind::DecodeReady { idx, kind } => {
                     format!(r#"{{"type":"decode_ready","idx":{idx},"kind":"{kind}"}}"#)
                 }
@@ -410,6 +431,11 @@ impl Grid {
         let viewport_bottom = viewport_top + self.viewport.height;
         let visible = cell_bottom.min(viewport_bottom) - cell_top.max(viewport_top);
         (visible / self.config.tile_height).clamp(0.0, 1.0)
+    }
+
+    pub fn visible_fraction_for_tile(&self, tile_idx: usize) -> Option<f32> {
+        let display_pos = self.display_order.iter().position(|&idx| idx == tile_idx)?;
+        Some(self.visible_fraction_for_display_pos(display_pos))
     }
 
     fn display_pos_to_row(&self, display_pos: usize) -> Option<usize> {

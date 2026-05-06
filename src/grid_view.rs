@@ -30,6 +30,7 @@ fn debug_mode() -> bool {
 /// Keeps the UI thread responsive at 60fps (~16ms frame budget).
 const FRAME_WORK_BUDGET_MS: f64 = 4.0;
 const MAX_RESULTS_PER_FRAME: usize = 32;
+const MAX_OFFSCREEN_PREFETCH_PER_FRAME: usize = 2;
 /// Thumbnail decode resolution (pixels).
 const THUMB_SIZE: u32 = 160;
 
@@ -148,6 +149,7 @@ struct DecodeRequest {
     idx: usize,
     path: PathBuf,
     data: Vec<u8>,
+    io_ms: f64,
     generation: u64,
     tier: WorkTier,
     is_heif: bool,
@@ -162,12 +164,14 @@ enum WorkResult {
         idx: usize,
         image: DecodedImage,
         ms: f64,
+        io_ms: f64,
         generation: u64,
     },
     /// No embedded thumbnail found. Includes file bytes for reuse.
     EmbeddedMiss {
         idx: usize,
         ms: f64,
+        io_ms: f64,
         data: Option<Vec<u8>>,
         generation: u64,
     },
@@ -176,6 +180,7 @@ enum WorkResult {
         idx: usize,
         image: DecodedImage,
         ms: f64,
+        io_ms: f64,
         generation: u64,
     },
     /// Upscale decode completed.
@@ -183,16 +188,23 @@ enum WorkResult {
         idx: usize,
         image: DecodedImage,
         ms: f64,
+        io_ms: f64,
         generation: u64,
     },
     /// Date-taken metadata extracted.
     DateScanned {
         idx: usize,
         date: Option<String>,
+        io_ms: f64,
         generation: u64,
     },
     /// Decode failed.
-    Failed { idx: usize, generation: u64 },
+    Failed {
+        idx: usize,
+        io_ms: f64,
+        decode_ms: f64,
+        generation: u64,
+    },
 }
 
 impl WorkResult {
@@ -310,6 +322,7 @@ impl GridView {
                                             idx: req.idx,
                                             image,
                                             ms,
+                                            io_ms: req.io_ms,
                                             generation: req.generation,
                                         });
                                     }
@@ -317,6 +330,7 @@ impl GridView {
                                         let _ = result_tx.send(WorkResult::EmbeddedMiss {
                                             idx: req.idx,
                                             ms,
+                                            io_ms: req.io_ms,
                                             data: None,
                                             generation: req.generation,
                                         });
@@ -336,12 +350,15 @@ impl GridView {
                                             idx: req.idx,
                                             image,
                                             ms,
+                                            io_ms: req.io_ms,
                                             generation: req.generation,
                                         });
                                     }
                                     Err(_) => {
                                         let _ = result_tx.send(WorkResult::Failed {
                                             idx: req.idx,
+                                            io_ms: req.io_ms,
+                                            decode_ms: ms,
                                             generation: req.generation,
                                         });
                                     }
@@ -362,12 +379,15 @@ impl GridView {
                                             idx: req.idx,
                                             image,
                                             ms,
+                                            io_ms: req.io_ms,
                                             generation: req.generation,
                                         });
                                     }
                                     None => {
                                         let _ = result_tx.send(WorkResult::Failed {
                                             idx: req.idx,
+                                            io_ms: req.io_ms,
+                                            decode_ms: ms,
                                             generation: req.generation,
                                         });
                                     }
@@ -378,6 +398,7 @@ impl GridView {
                                 let _ = result_tx.send(WorkResult::DateScanned {
                                     idx: req.idx,
                                     date,
+                                    io_ms: req.io_ms,
                                     generation: req.generation,
                                 });
                             }
@@ -391,6 +412,7 @@ impl GridView {
                                             idx: req.idx,
                                             image,
                                             ms,
+                                            io_ms: req.io_ms,
                                             generation: req.generation,
                                         });
                                     }
@@ -401,6 +423,8 @@ impl GridView {
                                         );
                                         let _ = result_tx.send(WorkResult::Failed {
                                             idx: req.idx,
+                                            io_ms: req.io_ms,
+                                            decode_ms: ms,
                                             generation: req.generation,
                                         });
                                     }
@@ -514,12 +538,20 @@ impl GridView {
             processed += 1;
 
             if result.generation() < self.generation.load(Ordering::Relaxed) {
+                self.record_work_accounting_for_result(&result, true);
                 continue;
             }
 
             match result {
-                WorkResult::EmbeddedOk { idx, image, ms, .. } => {
+                WorkResult::EmbeddedOk {
+                    idx,
+                    image,
+                    ms,
+                    io_ms,
+                    ..
+                } => {
                     if idx < self.grid.tile_count() {
+                        self.record_work_accounting(idx, "embedded_ok", io_ms, ms, false);
                         self.ensure_vecs(idx);
                         let size = [image.width as usize, image.height as usize];
                         self.decoded_sizes[idx] = Some((image.width, image.height));
@@ -542,8 +574,15 @@ impl GridView {
                         self.grid.set_tile_state(idx, TileState::Loaded);
                     }
                 }
-                WorkResult::EmbeddedMiss { idx, ms, data, .. } => {
+                WorkResult::EmbeddedMiss {
+                    idx,
+                    ms,
+                    io_ms,
+                    data,
+                    ..
+                } => {
                     if idx < self.grid.tile_count() {
+                        self.record_work_accounting(idx, "embedded_miss", io_ms, ms, false);
                         self.ensure_vecs(idx);
                         self.timings[idx].embedded_ms = ms;
                         if data.is_some() {
@@ -557,8 +596,15 @@ impl GridView {
                         self.grid.set_tile_state(idx, TileState::EmbeddedMissed);
                     }
                 }
-                WorkResult::FullOk { idx, image, ms, .. } => {
+                WorkResult::FullOk {
+                    idx,
+                    image,
+                    ms,
+                    io_ms,
+                    ..
+                } => {
                     if idx < self.grid.tile_count() {
+                        self.record_work_accounting(idx, "full_ok", io_ms, ms, false);
                         self.ensure_vecs(idx);
                         self.video_scanning.remove(&idx);
                         let size = [image.width as usize, image.height as usize];
@@ -582,8 +628,14 @@ impl GridView {
                         self.grid.set_tile_state(idx, TileState::Loaded);
                     }
                 }
-                WorkResult::Failed { idx, .. } => {
+                WorkResult::Failed {
+                    idx,
+                    io_ms,
+                    decode_ms,
+                    ..
+                } => {
                     if idx < self.grid.tile_count() {
+                        self.record_work_accounting(idx, "failed", io_ms, decode_ms, false);
                         self.ensure_vecs(idx);
                         self.upgrading.remove(&idx);
                         self.upscale_attempted.insert(idx);
@@ -596,8 +648,15 @@ impl GridView {
                         self.grid.set_tile_state(idx, TileState::Failed);
                     }
                 }
-                WorkResult::UpscaleOk { idx, image, ms, .. } => {
+                WorkResult::UpscaleOk {
+                    idx,
+                    image,
+                    ms,
+                    io_ms,
+                    ..
+                } => {
                     if idx < self.grid.tile_count() {
+                        self.record_work_accounting(idx, "upscale_ok", io_ms, ms, false);
                         self.ensure_vecs(idx);
                         let size = [image.width as usize, image.height as usize];
                         self.decoded_sizes[idx] = Some((image.width, image.height));
@@ -620,8 +679,11 @@ impl GridView {
                         });
                     }
                 }
-                WorkResult::DateScanned { idx, date, .. } => {
+                WorkResult::DateScanned {
+                    idx, date, io_ms, ..
+                } => {
                     if idx < self.grid.tile_count() {
+                        self.record_work_accounting(idx, "date_scan", io_ms, 0.0, false);
                         self.date_scanning.remove(&idx);
                         if date.is_some() {
                             self.grid.set_tile_date(idx, date);
@@ -633,6 +695,54 @@ impl GridView {
             }
         }
         processed
+    }
+
+    fn record_work_accounting_for_result(&mut self, result: &WorkResult, stale: bool) {
+        match result {
+            WorkResult::EmbeddedOk { idx, ms, io_ms, .. } => {
+                self.record_work_accounting(*idx, "embedded_ok", *io_ms, *ms, stale)
+            }
+            WorkResult::EmbeddedMiss { idx, ms, io_ms, .. } => {
+                self.record_work_accounting(*idx, "embedded_miss", *io_ms, *ms, stale)
+            }
+            WorkResult::FullOk { idx, ms, io_ms, .. } => {
+                self.record_work_accounting(*idx, "full_ok", *io_ms, *ms, stale)
+            }
+            WorkResult::UpscaleOk { idx, ms, io_ms, .. } => {
+                self.record_work_accounting(*idx, "upscale_ok", *io_ms, *ms, stale)
+            }
+            WorkResult::DateScanned { idx, io_ms, .. } => {
+                self.record_work_accounting(*idx, "date_scan", *io_ms, 0.0, stale)
+            }
+            WorkResult::Failed {
+                idx,
+                io_ms,
+                decode_ms,
+                ..
+            } => self.record_work_accounting(*idx, "failed", *io_ms, *decode_ms, stale),
+        }
+    }
+
+    fn record_work_accounting(
+        &mut self,
+        idx: usize,
+        tier: &str,
+        io_ms: f64,
+        decode_ms: f64,
+        stale: bool,
+    ) {
+        if !self.grid.logging_enabled() {
+            return;
+        }
+        let visible_fraction = self.grid.visible_fraction_for_tile(idx).unwrap_or(0.0);
+        self.grid.record_event(GridEventKind::WorkAccounting {
+            idx,
+            tier: tier.into(),
+            io_ms,
+            decode_ms,
+            stale,
+            visible_fraction,
+        });
     }
 
     // -- Scheduling ---------------------------------------------------------
@@ -712,6 +822,7 @@ impl GridView {
                         idx,
                         path,
                         data,
+                        io_ms: 0.0,
                         generation: current_gen,
                         tier: WorkTier::FullDecode,
                         is_heif,
@@ -865,6 +976,9 @@ impl GridView {
             if std::time::Instant::now() >= *deadline {
                 break;
             }
+            if scheduled_count >= MAX_OFFSCREEN_PREFETCH_PER_FRAME {
+                break;
+            }
 
             let mut found = false;
 
@@ -945,6 +1059,7 @@ impl GridView {
                 return;
             }
 
+            let io_start = std::time::Instant::now();
             let data = match tier {
                 WorkTier::EmbeddedOnly if is_heif => Some(Vec::new()),
                 WorkTier::EmbeddedOnly => {
@@ -969,6 +1084,7 @@ impl GridView {
                     })()
                 }
             };
+            let io_ms = io_start.elapsed().as_secs_f64() * 1000.0;
 
             let Some(data) = data else { return };
             if generation < gen_counter.load(Ordering::Relaxed) {
@@ -978,6 +1094,7 @@ impl GridView {
                 idx,
                 path,
                 data,
+                io_ms,
                 generation,
                 tier,
                 is_heif,
