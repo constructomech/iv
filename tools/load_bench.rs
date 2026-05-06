@@ -1,4 +1,5 @@
 use crossbeam_channel::{Receiver, Sender};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::Instant;
@@ -15,6 +16,7 @@ fn main() {
             warmups,
             limit,
         } => run_directory_bench(&path, runs, warmups, limit),
+        LoadBenchCommand::File { path, runs } => run_file_bench(&path, runs),
     }
 }
 
@@ -25,6 +27,10 @@ enum LoadBenchCommand {
         runs: usize,
         warmups: usize,
         limit: Option<usize>,
+    },
+    File {
+        path: PathBuf,
+        runs: usize,
     },
 }
 
@@ -37,6 +43,7 @@ fn parse_args(args: &[String]) -> LoadBenchCommand {
     let mut runs = 1usize;
     let mut warmups = 1usize;
     let mut limit = None;
+    let mut file = None;
     let mut score_path = None;
     let mut i = 0;
     while i < args.len() {
@@ -78,6 +85,13 @@ fn parse_args(args: &[String]) -> LoadBenchCommand {
                     std::process::exit(1);
                 }));
             }
+            "--file" => {
+                i += 1;
+                if i >= args.len() {
+                    print_usage_and_exit();
+                }
+                file = Some(PathBuf::from(&args[i]));
+            }
             arg if arg.starts_with('-') => print_usage_and_exit(),
             path => score_path = Some(PathBuf::from(path)),
         }
@@ -91,6 +105,9 @@ fn parse_args(args: &[String]) -> LoadBenchCommand {
             warmups,
             limit,
         };
+    }
+    if let Some(path) = file {
+        return LoadBenchCommand::File { path, runs };
     }
     let Some(path) = score_path else {
         print_usage_and_exit()
@@ -192,6 +209,18 @@ fn run_directory_bench(path: &Path, runs: usize, warmups: usize, limit: Option<u
     println!("Warmups: {warmups}");
     println!("Runs: {runs}");
     println!("Decode workers: {}", iv::thumbnail_decode_worker_count());
+    println!(
+        "Media counts: heif={} video={} other={}",
+        files
+            .iter()
+            .filter(|path| iv::is_heif_extension(path))
+            .count(),
+        files.iter().filter(|path| iv::is_video_file(path)).count(),
+        files
+            .iter()
+            .filter(|path| !iv::is_heif_extension(path) && !iv::is_video_file(path))
+            .count()
+    );
 
     for warmup in 1..=warmups {
         let score = run_directory_once(&files);
@@ -204,10 +233,23 @@ fn run_directory_bench(path: &Path, runs: usize, warmups: usize, limit: Option<u
     let mut scores = Vec::with_capacity(runs);
     for run in 1..=runs {
         let score = run_directory_once(&files);
-        println!(
-            "run={run} total_ms={:.1} first_ms={:.1} full_ms={:.1} failures={}",
-            score.total_ms, score.first_ms, score.full_ms, score.failures
-        );
+        if std::env::var("IV_LOAD_BENCH_BY_KIND").is_ok() {
+            println!(
+                "run={run} total_ms={:.1} first_ms={:.1} full_ms={:.1} failures={} heif_ms={:.1} video_ms={:.1} other_ms={:.1}",
+                score.total_ms,
+                score.first_ms,
+                score.full_ms,
+                score.failures,
+                score.heif_ms,
+                score.video_ms,
+                score.other_ms
+            );
+        } else {
+            println!(
+                "run={run} total_ms={:.1} first_ms={:.1} full_ms={:.1} failures={}",
+                score.total_ms, score.first_ms, score.full_ms, score.failures
+            );
+        }
         scores.push(score.total_ms);
     }
 
@@ -218,19 +260,51 @@ fn run_directory_bench(path: &Path, runs: usize, warmups: usize, limit: Option<u
     println!("max_ms={:.1}", scores[scores.len() - 1]);
 }
 
+fn run_file_bench(path: &Path, runs: usize) {
+    for run in 1..=runs {
+        let started = Instant::now();
+        match decode_thumbnail_like_grid(path) {
+            Ok(image) => println!(
+                "run={run} ok=true total_ms={:.1} size={}x{}",
+                started.elapsed().as_secs_f64() * 1000.0,
+                image.width,
+                image.height
+            ),
+            Err(err) => println!(
+                "run={run} ok=false total_ms={:.1} error={err}",
+                started.elapsed().as_secs_f64() * 1000.0
+            ),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 struct DirectoryRunScore {
     total_ms: f64,
     first_ms: f64,
     full_ms: f64,
     failures: usize,
+    heif_ms: f64,
+    video_ms: f64,
+    other_ms: f64,
 }
 
 #[derive(Debug)]
 struct BenchResult {
     finished: Instant,
+    duration_ms: f64,
+    width: u32,
+    height: u32,
+    kind: BenchKind,
     ok: bool,
     path: PathBuf,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum BenchKind {
+    Heif,
+    Video,
+    Other,
 }
 
 fn run_directory_once(files: &[PathBuf]) -> DirectoryRunScore {
@@ -249,15 +323,37 @@ fn run_directory_once(files: &[PathBuf]) -> DirectoryRunScore {
     let mut full_ms: f64 = 0.0;
     let mut failures = 0usize;
     let mut failed_paths = Vec::new();
+    let mut by_ext = BTreeMap::<String, (usize, f64)>::new();
+    let mut slowest = Vec::<BenchResult>::new();
+    let mut heif_ms = 0.0;
+    let mut video_ms = 0.0;
+    let mut other_ms = 0.0;
     for _ in 0..files.len() {
         let result = result_rx.recv().unwrap();
         if !result.ok {
             failures += 1;
-            failed_paths.push(result.path);
+            failed_paths.push(result.path.clone());
         }
         let elapsed = result.finished.duration_since(start).as_secs_f64() * 1000.0;
         first_ms.get_or_insert(elapsed);
         full_ms = full_ms.max(elapsed);
+        match result.kind {
+            BenchKind::Heif => heif_ms += result.duration_ms,
+            BenchKind::Video => video_ms += result.duration_ms,
+            BenchKind::Other => other_ms += result.duration_ms,
+        }
+        if std::env::var("IV_LOAD_BENCH_BY_EXT").is_ok() {
+            let ext = result
+                .path
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .map(|ext| ext.to_ascii_lowercase())
+                .unwrap_or_else(|| "<none>".into());
+            let entry = by_ext.entry(ext).or_default();
+            entry.0 += 1;
+            entry.1 += result.duration_ms;
+            slowest.push(result);
+        }
     }
     for worker in workers {
         worker.join().unwrap();
@@ -269,11 +365,35 @@ fn run_directory_once(files: &[PathBuf]) -> DirectoryRunScore {
         }
     }
 
+    if std::env::var("IV_LOAD_BENCH_BY_EXT").is_ok() {
+        println!("by_ext:");
+        for (ext, (count, ms)) in by_ext {
+            println!(
+                "  {ext} count={count} total_ms={ms:.1} avg_ms={:.1}",
+                ms / count as f64
+            );
+        }
+        slowest.sort_by(|a, b| b.duration_ms.total_cmp(&a.duration_ms));
+        println!("slowest:");
+        for result in slowest.iter().take(20) {
+            println!(
+                "  {:.1}ms {}x{} {}",
+                result.duration_ms,
+                result.width,
+                result.height,
+                result.path.display()
+            );
+        }
+    }
+
     DirectoryRunScore {
         total_ms: start.elapsed().as_secs_f64() * 1000.0,
         first_ms: first_ms.unwrap_or(0.0),
         full_ms,
         failures,
+        heif_ms,
+        video_ms,
+        other_ms,
     }
 }
 
@@ -288,9 +408,20 @@ fn spawn_decode_workers(
             let result_tx = result_tx.clone();
             thread::spawn(move || {
                 while let Ok(path) = work_rx.recv() {
-                    let ok = decode_thumbnail_like_grid(&path).is_ok();
+                    let kind = bench_kind(&path);
+                    let started = Instant::now();
+                    let result = decode_thumbnail_like_grid(&path);
+                    let finished = Instant::now();
+                    let (ok, width, height) = match result {
+                        Ok(image) => (true, image.width, image.height),
+                        Err(_) => (false, 0, 0),
+                    };
                     let _ = result_tx.send(BenchResult {
-                        finished: Instant::now(),
+                        finished,
+                        duration_ms: finished.duration_since(started).as_secs_f64() * 1000.0,
+                        width,
+                        height,
+                        kind,
                         ok,
                         path,
                     });
@@ -300,18 +431,28 @@ fn spawn_decode_workers(
         .collect()
 }
 
-fn decode_thumbnail_like_grid(path: &Path) -> Result<(), String> {
+fn bench_kind(path: &Path) -> BenchKind {
     if iv::is_video_file(path) {
-        iv::decode_video_thumbnail(path, THUMB_SIZE).map(|_| ())
+        BenchKind::Video
     } else if iv::is_heif_extension(path) {
-        if iv::try_heif_thumbnail(path).is_some() {
-            Ok(())
+        BenchKind::Heif
+    } else {
+        BenchKind::Other
+    }
+}
+
+fn decode_thumbnail_like_grid(path: &Path) -> Result<iv::DecodedImage, String> {
+    if iv::is_video_file(path) {
+        iv::decode_video_thumbnail(path, THUMB_SIZE)
+    } else if iv::is_heif_extension(path) {
+        if let Some(image) = iv::try_heif_thumbnail(path) {
+            Ok(image)
         } else {
-            iv::decode_thumbnail(path, THUMB_SIZE).map(|_| ())
+            iv::decode_thumbnail(path, THUMB_SIZE)
         }
     } else {
         match iv::decode_thumbnail_progressive(path, THUMB_SIZE) {
-            Ok(_) => Ok(()),
+            Ok((image, _, _)) => Ok(image),
             Err(err) => Err(err),
         }
     }
@@ -368,5 +509,6 @@ fn format_optional_ms(value: Option<f64>) -> String {
 fn print_usage_and_exit() -> ! {
     eprintln!("Usage: iv-load-bench <fixture-or-activity-log.json>");
     eprintln!("       iv-load-bench --dir <folder> [--runs N] [--warmups N] [--limit N]");
+    eprintln!("       iv-load-bench --file <media-file> [--runs N]");
     std::process::exit(1);
 }

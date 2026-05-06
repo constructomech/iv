@@ -46,7 +46,6 @@ typedef struct IvFfmpegApi {
     int (*avformat_find_stream_info)(AVFormatContext *ic, AVDictionary **options);
     int (*av_find_best_stream)(AVFormatContext *ic, enum AVMediaType type, int wanted_stream_nb, int related_stream, const AVCodec **decoder_ret, int flags);
     int (*av_read_frame)(AVFormatContext *s, AVPacket *pkt);
-    int (*av_seek_frame)(AVFormatContext *s, int stream_index, int64_t timestamp, int flags);
 
     const AVCodec *(*avcodec_find_decoder)(enum AVCodecID id);
     AVCodecContext *(*avcodec_alloc_context3)(const AVCodec *codec);
@@ -132,7 +131,6 @@ static int iv_ffmpeg_load_inner(void) {
     IV_LOAD_SYMBOL(avformat, avformat_find_stream_info);
     IV_LOAD_SYMBOL(avformat, av_find_best_stream);
     IV_LOAD_SYMBOL(avformat, av_read_frame);
-    IV_LOAD_SYMBOL(avformat, av_seek_frame);
 
     IV_LOAD_SYMBOL(avcodec, avcodec_find_decoder);
     IV_LOAD_SYMBOL(avcodec, avcodec_alloc_context3);
@@ -406,6 +404,15 @@ int iv_ffmpeg_decode_thumbnail(const char *path, int max_size, unsigned char **o
     int best_score = -1;
     int ret = 0;
 
+    fmt_ctx = g_ffmpeg.avformat_alloc_context();
+    if (!fmt_ctx) {
+        snprintf(err, (size_t)err_len, "failed to allocate FFmpeg format context");
+        ret = -1;
+        goto cleanup;
+    }
+    fmt_ctx->probesize = 32768;
+    fmt_ctx->max_analyze_duration = 0;
+
     ret = g_ffmpeg.avformat_open_input(&fmt_ctx, path, NULL, NULL);
     if (ret < 0) goto fail_ffmpeg;
 
@@ -447,12 +454,6 @@ int iv_ffmpeg_decode_thumbnail(const char *path, int max_size, unsigned char **o
         snprintf(err, (size_t)err_len, "failed to allocate FFmpeg decode buffers");
         ret = -1;
         goto cleanup;
-    }
-
-    if (stream->time_base.den > 0 && stream->time_base.num > 0) {
-        int64_t ts = stream->start_time == AV_NOPTS_VALUE ? 0 : stream->start_time;
-        ts += (int64_t)((100000.0 * (double)stream->time_base.den) / (1000000.0 * (double)stream->time_base.num));
-        g_ffmpeg.av_seek_frame(fmt_ctx, stream_index, ts, AVSEEK_FLAG_BACKWARD);
     }
 
     int packets = 0;

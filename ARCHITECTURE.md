@@ -306,9 +306,10 @@ the actual codec code lives in the external vcpkg runtime DLLs (`heif.dll`,
 **Video files**: `.mov`, `.mp4`, `.webm`, `.mkv`, `.avi`, `.3gp`, `.mpg`, `.mpeg`, `.vob`, and `.wmv` entries are enumerated into the
 same grid but use a separate `VideoThumbnail` work tier. `decode_video_thumbnail()`
 calls a small C wrapper that dynamically loads FFmpeg DLLs (`avcodec`,
-`avformat`, `avutil`, `swscale`) at thumbnail time, seeks near the start, decodes
-early frames, keeps the best non-black candidate, scales it to RGBA, and returns
-the existing `DecodedImage` texture path. The main executable does not link to
+`avformat`, `avutil`, `swscale`) at thumbnail time, opens the container with a
+bounded stream-info probe, decodes the first few video packets from the current
+demuxer position, keeps the best non-black candidate, scales it to RGBA, and
+returns the existing `DecodedImage` texture path. The main executable does not link to
 FFmpeg import libraries or require the DLLs at startup; distributed builds must
 ship the LGPL FFmpeg DLLs beside the executable or make them available on
 `PATH`. If the DLLs are missing or the codec is unsupported, the tile transitions
