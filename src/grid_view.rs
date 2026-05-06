@@ -237,6 +237,8 @@ pub struct GridView {
     decoded_sizes: Vec<Option<(u32, u32)>>,
     /// Indices of tiles with in-flight upscale decodes.
     upgrading: std::collections::HashSet<usize>,
+    /// Tile indices that already tried an upscale at the current display size.
+    upscale_attempted: std::collections::HashSet<usize>,
     /// Indices of tiles with in-flight date scans.
     date_scanning: std::collections::HashSet<usize>,
     /// Indices of video tiles with in-flight thumbnail extraction.
@@ -418,6 +420,7 @@ impl GridView {
             textures: Vec::new(),
             decoded_sizes: Vec::new(),
             upgrading: std::collections::HashSet::new(),
+            upscale_attempted: std::collections::HashSet::new(),
             date_scanning: std::collections::HashSet::new(),
             video_scanning: std::collections::HashSet::new(),
             timings: Vec::new(),
@@ -463,6 +466,7 @@ impl GridView {
         self.textures.clear();
         self.decoded_sizes.clear();
         self.upgrading.clear();
+        self.upscale_attempted.clear();
         self.date_scanning.clear();
         self.video_scanning.clear();
         self.timings.clear();
@@ -582,6 +586,7 @@ impl GridView {
                     if idx < self.grid.tile_count() {
                         self.ensure_vecs(idx);
                         self.upgrading.remove(&idx);
+                        self.upscale_attempted.insert(idx);
                         self.video_scanning.remove(&idx);
                         self.grid.record_event(GridEventKind::ResultReceived {
                             idx,
@@ -603,6 +608,7 @@ impl GridView {
                             egui::TextureOptions::LINEAR,
                         ));
                         self.upgrading.remove(&idx);
+                        self.upscale_attempted.insert(idx);
                         self.grid.record_event(GridEventKind::ResultReceived {
                             idx,
                             kind: "upscale_ok".into(),
@@ -765,6 +771,9 @@ impl GridView {
             if self.upgrading.contains(&idx) {
                 continue;
             }
+            if self.upscale_attempted.contains(&idx) {
+                continue;
+            }
             let Some(&Some((dw, dh))) = self.decoded_sizes.get(idx) else {
                 continue;
             };
@@ -779,6 +788,7 @@ impl GridView {
                 continue;
             }
             self.upgrading.insert(idx);
+            self.upscale_attempted.insert(idx);
             let is_heif = decode::is_heif_extension(&path);
             self.spawn_io_read(
                 idx,
@@ -987,6 +997,7 @@ impl GridView {
             // Drain pending decode requests (I/O tasks check generation before sending)
             while self.decode_rx.try_recv().is_ok() {}
             self.upgrading.clear();
+            self.upscale_attempted.clear();
             self.date_scanning.clear();
             self.video_scanning.clear();
             let mut reset_count = 0;
@@ -1188,6 +1199,7 @@ impl GridView {
                 .changed()
             {
                 self.grid.set_tile_size(self.tile_size, self.tile_size);
+                self.upscale_attempted.clear();
             }
             ui.label(
                 egui::RichText::new(rust_i18n::t!(
