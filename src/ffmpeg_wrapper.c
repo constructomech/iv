@@ -26,6 +26,8 @@
 #include <windows.h>
 #endif
 
+#define IV_VIDEO_THUMB_MAX_PACKETS 8
+
 typedef struct IvFfmpegApi {
     int loaded;
     char error[256];
@@ -454,7 +456,7 @@ int iv_ffmpeg_decode_thumbnail(const char *path, int max_size, unsigned char **o
     }
 
     int packets = 0;
-    while (packets < 64 && (ret = g_ffmpeg.av_read_frame(fmt_ctx, packet)) >= 0) {
+    while (packets < IV_VIDEO_THUMB_MAX_PACKETS && (ret = g_ffmpeg.av_read_frame(fmt_ctx, packet)) >= 0) {
         if (packet->stream_index == stream_index) {
             packets++;
             ret = g_ffmpeg.avcodec_send_packet(codec_ctx, packet);
