@@ -8,6 +8,16 @@
 ///   cargo run --release --bin iv-bench -- --raw <source.raw> [--raw extra.raw ...]
 ///
 /// Generated files are cached next to the source. Delete to regenerate.
+///
+/// HEIC fixture: real-world HEIC content from iPhones is HEVC-coded, but the
+/// libheif build shipped with iv only includes an AV1 encoder (HEVC encoders
+/// are GPL via x265, which we deliberately exclude from the main build). So
+/// `iv-bench` does not synthesize HEIC fixtures. Instead, it pulls a real
+/// HEIC from disk in this order:
+///   1. A sibling `<source-stem>.heic` (or `.HEIC`) next to the RAW.
+///   2. Any `*.heic` / `*.HEIC` in the RAW's directory.
+///   3. `IV_BENCH_HEIC_FIXTURE` environment variable.
+/// If none of these is found, the HEIC row is skipped with a printed note.
 use image::{ImageFormat, RgbImage, RgbaImage};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -73,6 +83,10 @@ fn print_usage_and_exit() -> ! {
     eprintln!(
         "The first --raw file seeds generated comparison images; later raw files are benchmarked as extra RAW rows."
     );
+    eprintln!(
+        "HEIC fixture: pulled from a sibling <stem>.heic, then any *.heic in the source's directory,"
+    );
+    eprintln!("              then $IV_BENCH_HEIC_FIXTURE. Skipped if none of those is found.");
     std::process::exit(1);
 }
 
@@ -109,13 +123,25 @@ fn main() {
         "{}_bench",
         source.file_stem().unwrap_or_default().to_string_lossy()
     ));
+    let heic_fixture = resolve_heic_fixture(&source);
     if !bench_dir.exists() || dir_is_empty(&bench_dir) {
         std::fs::create_dir_all(&bench_dir).unwrap();
         println!("Generating test images in {}", bench_dir.display());
-        generate_formats(&bench_dir, &rgb, &rgba);
+        generate_formats(&bench_dir, &rgb, &rgba, heic_fixture.as_deref());
         println!();
     } else {
         println!("Using cached images in {}\n", bench_dir.display());
+    }
+
+    // Report what kind of HEIC the bench will use, if any.
+    let heic_path = bench_dir.join("heic.heic");
+    if heic_path.exists() {
+        report_heic_codec(&heic_path);
+    } else {
+        println!(
+            "HEIC fixture: <none found> (set $IV_BENCH_HEIC_FIXTURE or place a *.heic next to {} to include this row)",
+            source.display()
+        );
     }
 
     // Collect files to benchmark
@@ -173,7 +199,7 @@ fn main() {
 // Generation
 // ---------------------------------------------------------------------------
 
-fn generate_formats(dir: &Path, rgb: &RgbImage, rgba: &RgbaImage) {
+fn generate_formats(dir: &Path, rgb: &RgbImage, rgba: &RgbaImage, heic_fixture: Option<&Path>) {
     encode_step("  JPEG (q92+EXIF thumb)", || {
         let mut buf = Vec::new();
         let mut e = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buf, 92);
@@ -198,9 +224,21 @@ fn generate_formats(dir: &Path, rgb: &RgbImage, rgba: &RgbaImage) {
         rgba.save_with_format(dir.join("webp.webp"), ImageFormat::WebP)
             .unwrap();
     });
-    encode_step("  HEIC (AV1 q50+thumb)", || {
-        encode_heic(dir, rgb, "heic.heic");
-    });
+    if let Some(src) = heic_fixture {
+        encode_step(&format!("  HEIC (copy from {})", src.display()), || {
+            std::fs::copy(src, dir.join("heic.heic"))
+                .expect("failed to copy HEIC fixture into bench dir");
+        });
+    } else {
+        eprintln!(
+            "  HEIC: skipped — no real HEIC fixture found. Real iPhone content is HEVC, but the"
+        );
+        eprintln!(
+            "        bundled libheif build only has an AV1 encoder, so synthesizing one would"
+        );
+        eprintln!("        give a misleading number. Place a *.heic next to the source RAW or set");
+        eprintln!("        $IV_BENCH_HEIC_FIXTURE to include the HEIC row in this bench.");
+    }
     encode_step("  GIF (256-color)", || {
         rgba.save_with_format(dir.join("gif.gif"), ImageFormat::Gif)
             .unwrap();
@@ -265,19 +303,6 @@ fn build_app1(thumb: &[u8]) -> Vec<u8> {
     a.extend_from_slice(b"Exif\0\0");
     a.extend_from_slice(&t);
     a
-}
-
-fn encode_heic(dir: &Path, src: &RgbImage, name: &str) {
-    iv::encode_heif_av1_rgb_file(
-        dir.join(name).as_path(),
-        src.as_raw(),
-        src.width(),
-        src.height(),
-        50,
-        40,
-        320,
-    )
-    .unwrap();
 }
 
 fn rgba_to_rgb(rgba: &[u8]) -> Vec<u8> {
@@ -370,4 +395,120 @@ fn dir_is_empty(p: &Path) -> bool {
     std::fs::read_dir(p)
         .map(|mut d| d.next().is_none())
         .unwrap_or(true)
+}
+
+/// Pick a HEIC file to use as the bench fixture.
+///
+/// Preference order:
+///   1. Sibling `<source-stem>.heic` / `.HEIC` next to the source RAW.
+///   2. Any `*.heic` / `*.HEIC` in the source RAW's parent directory.
+///   3. `IV_BENCH_HEIC_FIXTURE` environment variable.
+fn resolve_heic_fixture(source: &Path) -> Option<PathBuf> {
+    if let Some(stem) = source.file_stem() {
+        for ext in ["heic", "HEIC", "heif", "HEIF"] {
+            let mut candidate = source.with_file_name(stem);
+            candidate.set_extension(ext);
+            if candidate.exists() {
+                return Some(candidate);
+            }
+        }
+    }
+    if let Some(parent) = source.parent() {
+        if let Ok(entries) = std::fs::read_dir(parent) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()).is_some_and(|e| {
+                    let lower = e.to_ascii_lowercase();
+                    lower == "heic" || lower == "heif"
+                }) {
+                    return Some(path);
+                }
+            }
+        }
+    }
+    if let Ok(env_path) = std::env::var("IV_BENCH_HEIC_FIXTURE") {
+        let path = PathBuf::from(env_path);
+        if path.exists() {
+            return Some(path);
+        }
+    }
+    None
+}
+
+/// Print whether the fixture HEIC contains HEVC (`hvc1`/`hev1`) or AV1 (`av01`)
+/// items, so the bench output makes the codec choice explicit. Reads only the
+/// first 16 KiB of the file and walks just enough ISOBMFF boxes to find the
+/// item types.
+fn report_heic_codec(path: &Path) {
+    use std::io::Read;
+    let mut buf = vec![0u8; 16384];
+    let read = match std::fs::File::open(path).and_then(|mut f| f.read(&mut buf)) {
+        Ok(n) => n,
+        Err(_) => {
+            println!("HEIC fixture: {} (codec: <unreadable>)", path.display());
+            return;
+        }
+    };
+    buf.truncate(read);
+    let codec = inspect_heif_codec(&buf).unwrap_or_else(|| "<unknown>".into());
+    println!(
+        "HEIC fixture: {} (codec: {}{})",
+        path.display(),
+        codec,
+        if codec == "AV1" {
+            " — synthetic, NOT representative of typical iPhone HEVC content"
+        } else {
+            ""
+        }
+    );
+}
+
+fn inspect_heif_codec(buf: &[u8]) -> Option<String> {
+    // Skip past `ftyp` so we don't match bytes there (very unlikely to contain
+    // codec 4CCs, but safest to start in the meta box). For real-world iPhone
+    // HEICs the meta box is much larger than our 16 KiB buffer, so once we
+    // enter meta we just scan the rest of the head buffer for codec 4CCs.
+    let mut p = 0usize;
+    while p + 8 <= buf.len() {
+        let size32 = u32::from_be_bytes(buf[p..p + 4].try_into().ok()?) as usize;
+        let box_type = std::str::from_utf8(&buf[p + 4..p + 8]).ok()?;
+        let (header_size, total_size) = if size32 == 1 {
+            if p + 16 > buf.len() {
+                break;
+            }
+            let big = u64::from_be_bytes(buf[p + 8..p + 16].try_into().ok()?);
+            (16usize, big as usize)
+        } else if size32 == 0 {
+            (8usize, buf.len() - p)
+        } else {
+            (8usize, size32)
+        };
+        if total_size < header_size {
+            break;
+        }
+        if box_type == "meta" {
+            let body_start = p + header_size + 4; // FullBox: skip version+flags
+            let body_end = (p + total_size).min(buf.len());
+            if body_start >= body_end {
+                break;
+            }
+            for window in buf[body_start..body_end].windows(4) {
+                match window {
+                    b"hvc1" | b"hev1" => return Some("HEVC".into()),
+                    b"av01" => return Some("AV1".into()),
+                    _ => {}
+                }
+            }
+            // We saw meta but no codec 4CC in the head buffer.
+            return None;
+        }
+        // Step over the box. If it would extend past the buffer, stop walking
+        // (any subsequent boxes are out of reach).
+        let next = p + total_size;
+        if next > buf.len() {
+            break;
+        }
+        p = next;
+    }
+    None
 }
