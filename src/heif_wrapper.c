@@ -36,6 +36,9 @@ typedef struct IvHeifApi {
     int (*heif_image_handle_get_list_of_thumbnail_IDs)(const heif_image_handle *handle, heif_item_id *ids, int count);
     heif_error (*heif_image_handle_get_thumbnail)(const heif_image_handle *main_image_handle, heif_item_id thumbnail_id, heif_image_handle **out_thumbnail_handle);
 
+    heif_decoding_options *(*heif_decoding_options_alloc)(void);
+    void (*heif_decoding_options_free)(heif_decoding_options *options);
+
     heif_error (*heif_decode_image)(const heif_image_handle *in_handle, heif_image **out_img, enum heif_colorspace colorspace, enum heif_chroma chroma, const heif_decoding_options *options);
     heif_error (*heif_context_get_encoder_for_format)(heif_context *context, enum heif_compression_format format, heif_encoder **encoder);
     void (*heif_encoder_release)(heif_encoder *encoder);
@@ -109,6 +112,8 @@ static int iv_heif_load_inner(void) {
     IV_HEIF_LOAD_SYMBOL(heif_image_handle_get_number_of_thumbnails);
     IV_HEIF_LOAD_SYMBOL(heif_image_handle_get_list_of_thumbnail_IDs);
     IV_HEIF_LOAD_SYMBOL(heif_image_handle_get_thumbnail);
+    IV_HEIF_LOAD_SYMBOL(heif_decoding_options_alloc);
+    IV_HEIF_LOAD_SYMBOL(heif_decoding_options_free);
     IV_HEIF_LOAD_SYMBOL(heif_decode_image);
     IV_HEIF_LOAD_SYMBOL(heif_context_get_encoder_for_format);
     IV_HEIF_LOAD_SYMBOL(heif_encoder_release);
@@ -189,7 +194,38 @@ static int iv_heif_copy_rgba(const heif_image *image, unsigned char **out_data, 
 
 static int iv_heif_decode_handle(const heif_image_handle *handle, unsigned char **out_data, int *out_width, int *out_height, char *err, int err_len) {
     heif_image *image = NULL;
-    heif_error heif_err = g_heif.heif_decode_image(handle, &image, heif_colorspace_RGB, heif_chroma_interleaved_RGBA, NULL);
+
+    /* Prefer the FFmpeg HEVC decoder plugin if our libheif build includes
+     * it (vcpkg `ffmpeg-decoder` feature). FFmpeg's HEVC decoder is much
+     * more SIMD-optimized than libheif's default libde265 backend. The
+     * upstream FFmpeg plugin registers itself with priority 90 vs
+     * libde265's 100, so without explicit selection libde265 always wins.
+     * We override that here.
+     *
+     * If the running heif.dll doesn't have the FFmpeg plugin compiled in
+     * (e.g., the user dropped in a different build), libheif returns
+     * "Plugin loading error" and we retry without the decoder hint to fall
+     * back to whatever decoder is registered (libde265, AV1, etc.).
+     */
+    heif_decoding_options *options = g_heif.heif_decoding_options_alloc();
+    if (options) {
+        options->decoder_id = "ffmpeg";
+    }
+    heif_error heif_err = g_heif.heif_decode_image(handle, &image, heif_colorspace_RGB, heif_chroma_interleaved_RGBA, options);
+    if (heif_err.code != heif_error_Ok && options) {
+        /* FFmpeg plugin unavailable in this libheif build — retry with the
+         * default decoder. We free the previous options first to avoid a
+         * leak, even though heif_decode_image is supposed to leave them
+         * untouched on failure. */
+        g_heif.heif_decoding_options_free(options);
+        options = NULL;
+        if (image) {
+            g_heif.heif_image_release(image);
+            image = NULL;
+        }
+        heif_err = g_heif.heif_decode_image(handle, &image, heif_colorspace_RGB, heif_chroma_interleaved_RGBA, NULL);
+    }
+    if (options) g_heif.heif_decoding_options_free(options);
     if (heif_err.code != heif_error_Ok) return iv_heif_fail(heif_err, err, err_len);
     if (!image) {
         if (err && err_len > 0) snprintf(err, (size_t)err_len, "libheif did not return an image");

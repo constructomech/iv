@@ -55,7 +55,16 @@ sudo apt install -y libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
 
 **Windows** — first build the vcpkg dependencies (one-time, takes a few minutes):
 ```powershell
+# 1. Bootstrap vcpkg + install LibRaw (driven by cargo-vcpkg).
 cargo vcpkg build
+
+# 2. Install libheif and FFmpeg. The `--overlay-ports` flag points at our
+#    custom libheif port that adds the `ffmpeg-decoder` feature, so libheif
+#    decodes HEIC's HEVC bitstream through FFmpeg (much faster SIMD path)
+#    instead of libde265.
+target\vcpkg\vcpkg.exe install --overlay-ports=vcpkg-overlay `
+    'libheif[hevc,ffmpeg-decoder]:x64-windows' `
+    'ffmpeg[avcodec,avformat,swscale]:x64-windows'
 ```
 
 Then build normally on all platforms:

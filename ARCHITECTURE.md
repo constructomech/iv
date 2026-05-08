@@ -298,12 +298,24 @@ the container (not in EXIF tags), so the EXIF approach doesn't work for them.
 Grid thumbnail workers decode HEIC thumbnails from the source file path rather
 than from the small probe buffer; libheif needs the complete container context for
 some HEVC thumbnail items, and truncated item data can decode as green blocks.
+
+The wrapper requests libheif's FFmpeg HEVC decoder plugin via
+`heif_decoding_options.decoder_id = "ffmpeg"` for a substantial speed-up over
+libheif's default libde265 backend (~5% on a 2400-file iPhone HEIC directory),
+because FFmpeg's HEVC decoder has heavier SIMD optimization and threading.
+Building the FFmpeg plugin into `heif.dll` requires the custom vcpkg port at
+`vcpkg-overlay/libheif/`, which adds the `ffmpeg-decoder` feature; see
+`README.md` for the install command. If the running `heif.dll` was built
+without the FFmpeg plugin, the wrapper falls back to the default libde265 path
+on the first decode attempt, so the runtime DLL stays drop-in replaceable.
+
 The main executable does not link to libheif import libraries or require
 `heif.dll` at startup; distributed builds must ship the LGPL libheif runtime
 DLLs beside the executable or make them available on `PATH`. The runtime HEIC
 decoder and benchmark HEIC encoder both go through the same dynamic DLL wrapper;
 the actual codec code lives in the external vcpkg runtime DLLs (`heif.dll`,
-`libde265.dll`, `aom.dll`, and their dependencies).
+`libde265.dll`, `aom.dll`, and their dependencies, plus the FFmpeg DLLs that
+the FFmpeg HEVC decoder plugin links against).
 
 **Video files**: `.mov`, `.mp4`, `.webm`, `.mkv`, `.avi`, `.3gp`, `.mpg`, `.mpeg`, `.vob`, and `.wmv` entries are enumerated into the
 same grid but use a separate `VideoThumbnail` work tier. `decode_video_thumbnail()`
