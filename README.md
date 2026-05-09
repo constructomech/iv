@@ -62,8 +62,14 @@ cargo vcpkg build
 #    custom libheif port that adds the `ffmpeg-decoder` feature, so libheif
 #    decodes HEIC's HEVC bitstream through FFmpeg (much faster SIMD path)
 #    instead of libde265.
+#
+#    The `[core,...]` form is important: it disables libheif's default
+#    features. The upstream port's default `hevc` feature pulls in GPL'd
+#    x265 (HEVC *encoder*), which we don't need or want — we only encode
+#    AV1 (BSD via aom) for the bench fixture, and we decode HEVC via the
+#    FFmpeg or libde265 plugins (both LGPL).
 target\vcpkg\vcpkg.exe install --overlay-ports=vcpkg-overlay `
-    'libheif[hevc,ffmpeg-decoder]:x64-windows' `
+    'libheif[core,ffmpeg-decoder,aom]:x64-windows' `
     'ffmpeg[avcodec,avformat,swscale]:x64-windows'
 ```
 
@@ -206,3 +212,10 @@ The overlay shows:
 - **EXIF X.Xms** — Time to extract and decode the embedded EXIF thumbnail (green = used)
 - **BMFF X.Xms** — Time to extract libheif container thumbnail for HEIC/HEIF files (green = used)
 - **Full X.Xms** — Time for full decode + downscale (shown when thumbnail was not available)
+
+## License
+
+`iv` is MIT-licensed; see `LICENSE`. The runtime DLLs that ship alongside
+`iv.exe` (libheif, libde265, FFmpeg components, aom) are LGPL or BSD; see
+`LICENSES.md` for the full per-component breakdown, source URLs, and
+guidance on staying GPL-clean.

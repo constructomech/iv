@@ -17,7 +17,8 @@
     }
   ],
   "default-features": [
-    "hevc"
+    "aom",
+    "ffmpeg-decoder"
   ],
   "features": {
     "aom": {
