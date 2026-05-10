@@ -162,7 +162,15 @@ impl IvApp {
         self.enum_handle = Some(enumerator::enumerate_folder(path.clone()));
         self.enum_done = false;
         self.current_folder = path.clone();
-        self.folder_tree.set_selected(path);
+        // If the new folder is still inside the existing tree's subtree, just
+        // move the selection. Otherwise (typical "go up" via breadcrumb),
+        // re-root the tree at the new folder so it shows that folder's
+        // siblings and children.
+        if path.starts_with(self.folder_tree.root_path()) {
+            self.folder_tree.set_selected(path);
+        } else {
+            self.folder_tree.re_root(path);
+        }
         self.mode = AppMode::Grid;
     }
 
@@ -280,7 +288,8 @@ impl IvApp {
     }
 
     fn show_folder_bar(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing.x = 2.0;
             if !self.folder_pane_open
                 && ui
                     .add_sized([22.0, 20.0], egui::Button::new(t!("folders.show_button")))
@@ -289,14 +298,95 @@ impl IvApp {
             {
                 self.folder_pane_open = true;
             }
-            ui.label(
-                egui::RichText::new(self.current_folder.display().to_string())
-                    .color(egui::Color32::from_rgb(160, 160, 160))
-                    .size(12.0),
-            );
+            ui.add_space(2.0);
+
+            let segments = breadcrumb_segments(&self.current_folder);
+            let last = segments.len().saturating_sub(1);
+            let separator = rust_i18n::t!("folders.breadcrumb_separator").to_string();
+            let mut clicked: Option<PathBuf> = None;
+
+            for (i, (label, path)) in segments.iter().enumerate() {
+                if i == last {
+                    // The current folder is rendered as plain text so it
+                    // visually communicates "you are here" and isn't a
+                    // distracting click target.
+                    ui.label(
+                        egui::RichText::new(label)
+                            .color(egui::Color32::from_rgb(210, 210, 210))
+                            .size(12.0),
+                    );
+                } else {
+                    let response = ui
+                        .add(
+                            egui::Button::new(
+                                egui::RichText::new(label)
+                                    .color(egui::Color32::from_rgb(160, 160, 160))
+                                    .size(12.0),
+                            )
+                            .frame(false),
+                        )
+                        .on_hover_text(rust_i18n::t!(
+                            "folders.breadcrumb_segment_hover",
+                            path = path.display().to_string()
+                        ));
+                    if response.clicked() {
+                        clicked = Some(path.clone());
+                    }
+                }
+
+                if i != last {
+                    ui.label(
+                        egui::RichText::new(&separator)
+                            .color(egui::Color32::from_rgb(110, 110, 110))
+                            .size(12.0),
+                    );
+                }
+            }
+
+            if let Some(path) = clicked {
+                self.open_folder(path);
+            }
         });
         ui.add_space(4.0);
     }
+}
+
+/// Split a path into breadcrumb segments. Each entry is `(display_label,
+/// cumulative_path)`, where `cumulative_path` is the path you'd navigate to
+/// if the user clicked that segment.
+///
+/// On Windows, the first segment is the drive prefix (e.g., `U:\`) so the
+/// user can navigate to the drive root. Across platforms, the first segment
+/// shown to the user reflects whatever `Path::ancestors` produces for the
+/// shallowest non-empty ancestor; on POSIX this is `/`.
+///
+/// Returns an empty vec for an empty path.
+fn breadcrumb_segments(path: &Path) -> Vec<(String, PathBuf)> {
+    let mut ancestors: Vec<&Path> = path.ancestors().collect();
+    ancestors.reverse();
+
+    let mut out = Vec::with_capacity(ancestors.len());
+    for ancestor in ancestors {
+        if ancestor.as_os_str().is_empty() {
+            continue;
+        }
+        let label = if let Some(name) = ancestor.file_name() {
+            name.to_string_lossy().into_owned()
+        } else {
+            // `ancestor` has no file_name, meaning it's a root prefix
+            // (`C:\`, `\\server\share\`, or POSIX `/`). Render the prefix
+            // verbatim, falling back to the localized root label so we
+            // never produce an empty segment.
+            let prefix = ancestor.to_string_lossy();
+            if prefix.is_empty() {
+                rust_i18n::t!("folders.breadcrumb_root_label").to_string()
+            } else {
+                prefix.into_owned()
+            }
+        };
+        out.push((label, ancestor.to_path_buf()));
+    }
+    out
 }
 
 impl eframe::App for IvApp {
@@ -386,5 +476,49 @@ mod tests {
 
         assert!(folder_has_direct_media(&dir));
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn breadcrumb_segments_split_nested_path() {
+        // Use a real directory tree we control so each ancestor exists and
+        // tests behave the same on Windows and POSIX.
+        let dir = make_test_dir("breadcrumb_nested");
+        let nested = dir.join("photos").join("2025");
+        fs::create_dir_all(&nested).unwrap();
+
+        let segments = breadcrumb_segments(&nested);
+        // Last segment must equal the input path; clicking it would just
+        // re-open the current folder (no-op in IvApp::open_folder).
+        assert_eq!(
+            segments.last().map(|(_, p)| p.as_path()),
+            Some(nested.as_path())
+        );
+        // Penultimate segment is the parent (`<dir>/photos`); clicking it
+        // should navigate up one level.
+        assert_eq!(
+            segments.get(segments.len() - 2).map(|(_, p)| p.as_path()),
+            Some(dir.join("photos").as_path())
+        );
+        // Labels for the last two are the directory names, not the full
+        // paths.
+        let labels: Vec<&str> = segments.iter().map(|(s, _)| s.as_str()).collect();
+        assert!(labels.contains(&"photos"));
+        assert!(labels.contains(&"2025"));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn breadcrumb_segments_empty_for_empty_path() {
+        assert!(breadcrumb_segments(Path::new("")).is_empty());
+    }
+
+    #[test]
+    fn breadcrumb_segments_handles_single_component() {
+        // A single-component relative path produces exactly one segment.
+        let segments = breadcrumb_segments(Path::new("solo"));
+        assert_eq!(segments.len(), 1);
+        assert_eq!(segments[0].0, "solo");
+        assert_eq!(segments[0].1, PathBuf::from("solo"));
     }
 }

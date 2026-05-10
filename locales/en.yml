@@ -41,6 +41,9 @@ folders:
   hide: "Hide folders"
   show_button: "›"
   hide_button: "‹"
+  breadcrumb_separator: "›"
+  breadcrumb_root_label: "/"
+  breadcrumb_segment_hover: "Open %{path}"
 
 grid:
   no_thumbnail: "No thumbnail"

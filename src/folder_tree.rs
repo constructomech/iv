@@ -60,6 +60,28 @@ impl FolderTree {
         self.selected = path;
     }
 
+    /// Returns the path the tree is currently rooted at.
+    pub fn root_path(&self) -> &Path {
+        &self.root.path
+    }
+
+    /// Rebuild the tree rooted at `new_root`. Existing expansion state and any
+    /// in-flight recursive scan are discarded; a fresh enumeration of the new
+    /// root will start lazily on the next `show()` call.
+    ///
+    /// This is intended for navigation that leaves the current root's subtree
+    /// (notably "go up" via the breadcrumb). When the destination is still a
+    /// descendant of the current root, callers should prefer `set_selected`
+    /// so they preserve the user's expansion state.
+    pub fn re_root(&mut self, new_root: PathBuf) {
+        let mut root = FolderNode::new(new_root.clone());
+        root.expanded = true;
+        self.root = root;
+        self.selected = new_root;
+        self.filter.clear();
+        self.recursive_scan = RecursiveScanState::Idle;
+    }
+
     pub fn show(&mut self, ui: &mut egui::Ui) -> Option<PathBuf> {
         self.root.poll_loads(ui.ctx());
         self.poll_recursive_scan(ui.ctx());
@@ -624,5 +646,36 @@ mod tests {
         assert!(!cats.has_child_folders);
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn re_root_replaces_root_path_and_resets_state() {
+        let original =
+            std::env::temp_dir().join(format!("iv_folder_tree_reroot_a_{}", std::process::id()));
+        let new =
+            std::env::temp_dir().join(format!("iv_folder_tree_reroot_b_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&original);
+        let _ = fs::remove_dir_all(&new);
+        fs::create_dir_all(&original).unwrap();
+        fs::create_dir_all(&new).unwrap();
+
+        let mut tree = FolderTree::new(original.clone());
+        tree.filter = "stale".into();
+        // Sanity: tree starts rooted at `original`.
+        assert_eq!(tree.root_path(), original.as_path());
+
+        tree.re_root(new.clone());
+
+        assert_eq!(tree.root_path(), new.as_path());
+        assert_eq!(tree.selected, new);
+        assert!(
+            tree.filter.is_empty(),
+            "filter should be cleared on re-root"
+        );
+        assert!(matches!(tree.recursive_scan, RecursiveScanState::Idle));
+        assert!(tree.root.expanded, "new root should auto-expand");
+
+        let _ = fs::remove_dir_all(&original);
+        let _ = fs::remove_dir_all(&new);
     }
 }

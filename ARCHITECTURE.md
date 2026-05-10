@@ -245,14 +245,21 @@ from painting into the current grid.
 ## Folder Browsing
 
 Folder browsing deliberately avoids a persistent cache or catalog. `IvApp` owns
-a `FolderTree` rooted at the launch folder and renders it in a collapsible left
-pane while in grid mode. The tree stores only expanded UI state for this app
-session. When launched on a folder that has no direct image files, the pane
-opens immediately so the user can choose a child folder. Expanding a node starts
-a tiny background scan of that directory's immediate child folders. No recursive
-counts, thumbnails, or metadata indexes are built. The scan also checks whether
-each returned child folder has direct child folders of its own, so known leaf
-folders render as plain rows without an expand disclosure.
+a `FolderTree` initially rooted at the launch folder and renders it in a
+collapsible left pane while in grid mode. The tree stores only expanded UI
+state for this app session. When launched on a folder that has no direct
+image files, the pane opens immediately so the user can choose a child
+folder. Expanding a node starts a tiny background scan of that directory's
+immediate child folders. No recursive counts, thumbnails, or metadata indexes
+are built. The scan also checks whether each returned child folder has
+direct child folders of its own, so known leaf folders render as plain rows
+without an expand disclosure.
+
+The folder bar above the grid shows the current folder as a clickable
+breadcrumb (segments separated by `›`). Clicking any earlier segment opens
+that ancestor folder. This is the only UI affordance for navigating *up* the
+filesystem; the tree pane is for going *down* into the subtree of the
+current root.
 
 The pane includes an in-memory text filter. Focusing the search box starts a
 session-only recursive folder scan under the tree root. Discovered folders are
@@ -262,10 +269,15 @@ image files, thumbnails, or metadata, and it does not build a persistent index.
 
 Selecting a folder replaces the current `Grid` with a fresh one, preserves the
 current tile size and sort mode, and starts the existing non-recursive media
-enumerator for that folder. `GridView::replace_grid()` keeps the decode worker
-pool alive but bumps the generation counter, drains pending work queues, clears
-textures and per-tile timing state, and ignores any stale results that finish
-after the switch.
+enumerator for that folder. If the new folder is still inside the existing
+tree's root, only the selection moves so the user keeps their expansion
+state. If the new folder is outside that subtree (the typical case for
+breadcrumb "go up" clicks), `FolderTree::re_root()` rebuilds the tree at
+the new path, discarding any in-flight recursive scan and resetting the
+filter so the user starts fresh in the new location. `GridView::replace_grid()`
+keeps the decode worker pool alive but bumps the generation counter, drains
+pending work queues, clears textures and per-tile timing state, and ignores
+any stale results that finish after the switch.
 
 The enumerator pairs iPhone Live Photos by matching same-directory, same-stem
 image/video files such as `IMG_0001.HEIC` and `IMG_0001.MOV`. The image remains
