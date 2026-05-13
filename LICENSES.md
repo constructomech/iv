@@ -22,11 +22,12 @@ component versions.
 | `avcodec-62.dll` | LGPL-2.1-or-later | https://github.com/FFmpeg/FFmpeg | FFmpeg codec library. Used directly by iv for video thumbnails, and by `heif.dll`'s FFmpeg HEVC decoder plugin. |
 | `avformat-62.dll` | LGPL-2.1-or-later | https://github.com/FFmpeg/FFmpeg | FFmpeg muxer/demuxer library. Used for video container parsing. |
 | `avutil-60.dll` | LGPL-2.1-or-later | https://github.com/FFmpeg/FFmpeg | FFmpeg shared utilities. |
+| `swresample-6.dll` | LGPL-2.1-or-later | https://github.com/FFmpeg/FFmpeg | FFmpeg audio resampling library. iv doesn't use audio, but `avcodec-62.dll` has it as a load-time DLL import, so it must be present alongside it. |
 | `swscale-9.dll` | LGPL-2.1-or-later | https://github.com/FFmpeg/FFmpeg | FFmpeg image scaling/colorspace library. |
 
-`avdevice-62.dll`, `avfilter-11.dll`, `swresample-6.dll`, and `pkgconf-7.dll`
-appear in the vcpkg `installed/x64-windows/bin/` directory but are not
-required by `iv.exe` or `heif.dll` at runtime.
+`avdevice-62.dll`, `avfilter-11.dll`, and `pkgconf-7.dll` appear in the
+vcpkg `installed/x64-windows/bin/` directory but are not required by
+`iv.exe` or `heif.dll` at runtime.
 
 ## Statically linked into `iv.exe`
 
