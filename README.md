@@ -84,6 +84,28 @@ cargo build --release
 
 The binary is at `target/debug/iv` (or `target/release/iv`).
 
+### Portable bundle (Windows)
+
+To produce a self-contained folder you can move around or zip for testing on
+another machine:
+
+```powershell
+.\scripts\package-portable.ps1
+```
+
+This builds the release binary (skip with `-SkipBuild` if you've just built),
+copies `iv.exe` and the minimum required DLLs (heif, libde265, aom, and
+the avcodec/avformat/avutil/swscale FFmpeg components) plus `LICENSE` and
+`LICENSES.md` into `dist\iv-portable\`. Total size is ~38 MB.
+
+The portable folder runs on any Windows x64 machine that has the Microsoft
+Visual C++ Redistributable installed (which is true of any dev box and most
+end-user systems). Pass a photo folder when launching:
+
+```powershell
+.\dist\iv-portable\iv.exe path\to\photos
+```
+
 ## Testing
 
 ```bash
