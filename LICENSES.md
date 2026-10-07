@@ -39,7 +39,20 @@ vcpkg `installed/x64-windows/bin/` directory but are not required by
 | JasPer | JasPer (MIT-style) | https://github.com/jasper-software/jasper | JPEG-2000 decoder, transitively required by LibRaw. |
 | libjpeg-turbo (`jpeg`) | IJG / BSD-style | https://github.com/libjpeg-turbo/libjpeg-turbo | JPEG codec, transitively required by LibRaw. |
 
-## Components excluded by design
+## System shared libraries (macOS/Linux)
+
+These builds link shared LibRaw, libheif, and FFmpeg libraries discovered through
+`pkg-config`; the native libraries remain external and replaceable. The Windows
+vcpkg pins and DLL list above do not describe system package versions or codec
+configurations.
+
+In particular, Homebrew's FFmpeg is GPL-enabled, and its libheif dependencies
+include x265. The Windows runtime's exclusion of GPL components does not apply
+to these system packages. Check the installed libraries' licenses and build
+configuration before redistributing a macOS/Linux binary or bundling libraries;
+such a distribution may be subject to GPL obligations, not just LGPL obligations.
+
+## Components excluded by design (Windows runtime)
 
 | Component | License | Why excluded |
 |---|---|---|

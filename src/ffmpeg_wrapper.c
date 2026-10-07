@@ -1,9 +1,8 @@
 /*
  * Thin dynamic-loading wrapper around FFmpeg.
  *
- * iv links this object into the main binary, but FFmpeg itself is loaded with
- * LoadLibrary at thumbnail decode time. That keeps startup independent from the
- * LGPL DLLs while still using FFmpeg's real-world video decoder coverage.
+ * Windows loads FFmpeg DLLs at decode time. Unix builds link shared libraries,
+ * keeping the codec libraries external and replaceable on both platforms.
  */
 
 #include <libavcodec/avcodec.h>
@@ -24,6 +23,8 @@
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#else
+#include <pthread.h>
 #endif
 
 #define IV_VIDEO_THUMB_MAX_PACKETS 8
@@ -113,8 +114,12 @@ static HMODULE iv_load_library(const char *name) {
         g_ffmpeg.field = (void *)iv_get_proc(g_ffmpeg.module, #field); \
         if (!g_ffmpeg.field) return -1; \
     } while (0)
+#else
+#define IV_LOAD_SYMBOL(module, field) g_ffmpeg.field = field
+#endif
 
 static int iv_ffmpeg_load_inner(void) {
+#ifdef _WIN32
     g_ffmpeg.avutil = iv_load_library("avutil-60.dll");
     g_ffmpeg.avcodec = iv_load_library("avcodec-62.dll");
     g_ffmpeg.avformat = iv_load_library("avformat-62.dll");
@@ -123,6 +128,7 @@ static int iv_ffmpeg_load_inner(void) {
         iv_set_error("failed to load FFmpeg runtime DLLs");
         return -1;
     }
+#endif
 
     IV_LOAD_SYMBOL(avformat, avformat_alloc_context);
     IV_LOAD_SYMBOL(avformat, avformat_free_context);
@@ -160,6 +166,7 @@ static int iv_ffmpeg_load_inner(void) {
     return 0;
 }
 
+#ifdef _WIN32
 static BOOL CALLBACK iv_ffmpeg_load_once(PINIT_ONCE init_once, PVOID parameter, PVOID *context) {
     (void)init_once;
     (void)parameter;
@@ -178,9 +185,19 @@ static int iv_ffmpeg_load(void) {
     return 0;
 }
 #else
+static pthread_once_t g_ffmpeg_once = PTHREAD_ONCE_INIT;
+
+static void iv_ffmpeg_load_once(void) {
+    iv_ffmpeg_load_inner();
+}
+
 static int iv_ffmpeg_load(void) {
-    snprintf(g_ffmpeg.error, sizeof(g_ffmpeg.error), "dynamic FFmpeg thumbnail decoding is implemented only for Windows");
-    return -1;
+    int err = pthread_once(&g_ffmpeg_once, iv_ffmpeg_load_once);
+    if (err != 0) {
+        snprintf(g_ffmpeg.error, sizeof(g_ffmpeg.error), "failed to initialize FFmpeg: %s", strerror(err));
+        return -1;
+    }
+    return 0;
 }
 #endif
 

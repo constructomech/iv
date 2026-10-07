@@ -303,7 +303,8 @@ fails when tag values reference offsets beyond the buffer. The JPEG
 thumbnail is then decoded directly with `zune-jpeg`.
 
 **HEIC / HEIF files**: Uses a small C wrapper that dynamically loads
-`heif.dll` at decode time, opens the ISOBMFF container, gets the primary image
+`heif.dll` at decode time on Windows (or links shared libheif on macOS/Linux),
+opens the ISOBMFF container, gets the primary image
 handle, checks `heif_image_handle_get_number_of_thumbnails()`, and decodes the
 first thumbnail to RGBA. HEIC files store thumbnails as separate image items in
 the container (not in EXIF tags), so the EXIF approach doesn't work for them.
@@ -321,7 +322,7 @@ Building the FFmpeg plugin into `heif.dll` requires the custom vcpkg port at
 without the FFmpeg plugin, the wrapper falls back to the default libde265 path
 on the first decode attempt, so the runtime DLL stays drop-in replaceable.
 
-The main executable does not link to libheif import libraries or require
+On Windows, the main executable does not link to libheif import libraries or require
 `heif.dll` at startup; distributed builds must ship the LGPL libheif runtime
 DLLs beside the executable or make them available on `PATH`. The runtime HEIC
 decoder and benchmark HEIC encoder both go through the same dynamic DLL wrapper;
@@ -331,11 +332,11 @@ the FFmpeg HEVC decoder plugin links against).
 
 **Video files**: `.mov`, `.mp4`, `.webm`, `.mkv`, `.avi`, `.3gp`, `.mpg`, `.mpeg`, `.vob`, and `.wmv` entries are enumerated into the
 same grid but use a separate `VideoThumbnail` work tier. `decode_video_thumbnail()`
-calls a small C wrapper that dynamically loads FFmpeg DLLs (`avcodec`,
+calls a small C wrapper that dynamically loads FFmpeg DLLs on Windows (`avcodec`,
 `avformat`, `avutil`, `swscale`) at thumbnail time, opens the container with a
 bounded stream-info probe, decodes the first few video packets from the current
 demuxer position, keeps the best non-black candidate, scales it to RGBA, and
-returns the existing `DecodedImage` texture path. The main executable does not link to
+returns the existing `DecodedImage` texture path. On Windows, the main executable does not link to
 FFmpeg import libraries or require the DLLs at startup; distributed builds must
 ship the LGPL FFmpeg DLLs beside the executable or make them available on
 `PATH`. If the DLLs are missing or the codec is unsupported, the tile transitions
@@ -344,6 +345,16 @@ are scheduled only for visible tiles and are not used by date sorting. Standalon
 video tiles launch the OS default video player when clicked. Live Photo image
 tiles show a `Live Image` badge and the full image view exposes a `Live` play
 button that launches the paired movie.
+
+On macOS/Linux, `build.rs` discovers LibRaw, libheif, and FFmpeg through
+`pkg-config` and links shared libraries rather than Windows import libraries or
+static codec archives. These libraries must be present at startup. The HEIF and
+FFmpeg wrappers use `pthread_once` to initialize their function tables safely
+across decode workers; Windows retains its `InitOnceExecuteOnce` DLL loaders.
+The binary imports the library's media module so Cargo's native link metadata
+also reaches the viewer executable. Missing shared libraries prevent startup;
+decoder failures still use the existing tile error handling. The HEIF decoder
+selection/fallback logic is unchanged.
 
 **Typical timing**: 40–80ms on local SSD, 100–300ms on network (SMB).
 The bottleneck is I/O latency, not decode time.
@@ -419,8 +430,9 @@ matching those faithfully would require a much larger raw development engine.
 A thin C wrapper (`src/libraw_wrapper.c`) encapsulates the full pipeline
 in one function call, avoiding any Rust dependency on LibRaw's complex
 `libraw_data_t` struct layout. LibRaw and its transitive dependencies
-(lcms2, zlib, jasper, jpeg) are installed via vcpkg and linked statically.
-We currently rely on LibRaw's CDDL option for static linking. If we decide to
+(lcms2, zlib, jasper, jpeg) are installed via vcpkg and linked statically on Windows.
+macOS/Linux instead link system shared LibRaw through `pkg-config`.
+Windows builds rely on LibRaw's CDDL option for static linking. If we decide to
 avoid CDDL too, LibRaw should get the same runtime-DLL treatment as libheif and
 FFmpeg.
 

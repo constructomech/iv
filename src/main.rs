@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+use iv::media;
 use rust_i18n::t;
 use std::env;
 use std::path::{Path, PathBuf};
@@ -18,7 +19,6 @@ mod grid;
 mod grid_view;
 mod image_view;
 mod launcher;
-mod media;
 
 fn main() {
     env_logger::init();
