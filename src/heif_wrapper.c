@@ -1,9 +1,8 @@
 /*
  * Thin dynamic-loading wrapper around libheif.
  *
- * The main executable compiles this wrapper but loads heif.dll at decode time.
- * This keeps the LGPL library replaceable and avoids linking libheif and its
- * codec dependencies into iv.exe.
+ * Windows loads heif.dll at decode time. Unix builds link shared libraries,
+ * keeping libheif and its codec dependencies external and replaceable.
  */
 
 #include <libheif/heif.h>
@@ -15,6 +14,8 @@
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#else
+#include <pthread.h>
 #endif
 
 typedef struct IvHeifApi {
@@ -95,13 +96,18 @@ static HMODULE iv_heif_load_library(const char *name) {
         g_heif.field = (void *)iv_heif_get_proc(g_heif.heif, #field); \
         if (!g_heif.field) return -1; \
     } while (0)
+#else
+#define IV_HEIF_LOAD_SYMBOL(field) g_heif.field = field
+#endif
 
 static int iv_heif_load_inner(void) {
+#ifdef _WIN32
     g_heif.heif = iv_heif_load_library("heif.dll");
     if (!g_heif.heif) {
         iv_heif_set_error("failed to load libheif runtime DLLs");
         return -1;
     }
+#endif
 
     IV_HEIF_LOAD_SYMBOL(heif_context_alloc);
     IV_HEIF_LOAD_SYMBOL(heif_context_free);
@@ -133,6 +139,7 @@ static int iv_heif_load_inner(void) {
     return 0;
 }
 
+#ifdef _WIN32
 static BOOL CALLBACK iv_heif_load_once(PINIT_ONCE init_once, PVOID parameter, PVOID *context) {
     (void)init_once;
     (void)parameter;
@@ -151,9 +158,19 @@ static int iv_heif_load(void) {
     return 0;
 }
 #else
+static pthread_once_t g_heif_once = PTHREAD_ONCE_INIT;
+
+static void iv_heif_load_once(void) {
+    iv_heif_load_inner();
+}
+
 static int iv_heif_load(void) {
-    snprintf(g_heif.error, sizeof(g_heif.error), "dynamic libheif decoding is implemented only for Windows");
-    return -1;
+    int err = pthread_once(&g_heif_once, iv_heif_load_once);
+    if (err != 0) {
+        snprintf(g_heif.error, sizeof(g_heif.error), "failed to initialize libheif: %s", strerror(err));
+        return -1;
+    }
+    return 0;
 }
 #endif
 

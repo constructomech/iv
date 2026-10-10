@@ -1845,6 +1845,7 @@ dependencies = [
  "kamadak-exif",
  "log",
  "open",
+ "pkg-config",
  "rust-i18n",
  "serde",
  "serde_json",

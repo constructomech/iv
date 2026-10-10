@@ -1228,7 +1228,7 @@ unsafe extern "C" {
 // ---------------------------------------------------------------------------
 
 // iv_libraw: our C wrapper (compiled by build.rs).
-// raw_r, lcms2, zlib, jasper, jpeg: LibRaw's transitive dependencies from vcpkg.
+// Native dependencies are linked by build.rs (vcpkg on Windows, pkg-config elsewhere).
 #[link(name = "iv_libraw", kind = "static")]
 unsafe extern "C" {
     fn iv_libraw_decode_buffer(
@@ -1243,21 +1243,6 @@ unsafe extern "C" {
 
     fn iv_libraw_free(ptr: *mut u8);
 }
-
-#[link(name = "raw_r", kind = "static")]
-unsafe extern "C" {}
-
-#[link(name = "lcms2", kind = "static")]
-unsafe extern "C" {}
-
-#[link(name = "zlib", kind = "static")]
-unsafe extern "C" {}
-
-#[link(name = "jasper", kind = "static")]
-unsafe extern "C" {}
-
-#[link(name = "jpeg", kind = "static")]
-unsafe extern "C" {}
 
 /// Decode a raw camera file to full-resolution RGBA using LibRaw.
 /// LibRaw handles demosaicing, white balance, and EXIF orientation internally.

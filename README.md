@@ -39,17 +39,21 @@ Install `cargo-vcpkg` to manage the native libheif dependency:
 cargo install cargo-vcpkg
 ```
 
-**macOS:** Xcode command line tools and libheif:
+**macOS:** Xcode command line tools and native image/video libraries:
 ```bash
 xcode-select --install
-brew install libheif
+brew install pkg-config libraw libheif ffmpeg
 ```
 
 **Linux (Debian/Ubuntu):** GPU, windowing, and libheif libraries:
 ```bash
 sudo apt install -y libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
-    libxkbcommon-dev libssl-dev libgtk-3-dev libheif-dev
+    libxkbcommon-dev libssl-dev libgtk-3-dev pkg-config libraw-dev libheif-dev \
+    libavcodec-dev libavformat-dev libavutil-dev libswscale-dev
 ```
+
+FFmpeg headers must be version 7 or newer. Older Linux distributions may need
+newer packages than their default repositories provide.
 
 ## Building
 
@@ -83,6 +87,16 @@ cargo build --release
 ```
 
 The binary is at `target/debug/iv` (or `target/release/iv`).
+
+macOS and Linux use `pkg-config` to locate native headers and link shared
+LibRaw, libheif, and FFmpeg libraries. Keep those libraries installed when
+running the viewer. If a custom installation is not found, set `PKG_CONFIG_PATH`
+to its `lib/pkgconfig` directory before building.
+
+Homebrew's FFmpeg and libheif dependencies can include GPL components such as
+x264/x265. These system libraries are not bundled by this project; do not assume
+the Windows bundle's LGPL-only runtime configuration applies to a Homebrew build.
+See [LICENSES.md](LICENSES.md) before redistributing native libraries.
 
 ### Portable bundle (Windows)
 
@@ -148,8 +162,11 @@ Delete the benchmark directory to regenerate test images.
 # Open a single image
 iv path/to/image.jpg
 
-# Open a folder (coming in Phase 1)
+# Open a folder
 iv path/to/photos/
+
+# Run the release build from the checkout (quote paths containing spaces)
+./target/release/iv "$HOME/OneDrive/Mom & Dad Backup"
 ```
 
 ## Development
